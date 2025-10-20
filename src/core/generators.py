@@ -73,7 +73,8 @@ class BaseGenerator(ABC):
         prompt = f"""Using the context below, answer the question **only** with the final answer.
 - Be concise and factual.
 - Do not include explanations, reasoning, or extra text.
-- Respond in a single line suitable for automatic comparison with ground truth.
+- Respond with only the answer for automatic comparison with ground truth. 
+- Do not state "Based on the context" or similar phrases, not even restating the question. Just provide the answer.
 
 Context:
 {context_str}

@@ -24,6 +24,33 @@ from .cache import RetrievalCache
 logger = logging.getLogger(__name__)
 
 
+def _extract_title_from_contents(contents: str) -> str:
+    """
+    Extract Wikipedia article title from PySerini document contents.
+
+    The wikipedia-dpr index stores the title as the first line in quotes.
+    Example: '"Three-point field goal"\nThe rest of the text...'
+
+    Args:
+        contents: Raw contents field from PySerini document
+
+    Returns:
+        Extracted title or 'Unknown' if extraction fails
+    """
+    if not contents:
+        return 'Unknown'
+
+    # Title is typically the first line in quotes
+    first_line = contents.split('\n')[0].strip()
+
+    # Remove surrounding quotes if present
+    if first_line.startswith('"') and first_line.endswith('"'):
+        return first_line[1:-1]
+
+    # Fallback: return first line as-is
+    return first_line if first_line else 'Unknown'
+
+
 class BaseRetriever(ABC):
     """Abstract base class for retrievers."""
 
@@ -141,10 +168,11 @@ class SparseRetriever(BaseRetriever):
             try:
                 doc = self.searcher.doc(hit.docid)
                 doc_dict = json.loads(doc.raw())
+                contents = doc_dict.get('contents', '')
                 results.append(RetrievalResult(
                     doc_id=hit.docid,
-                    title=doc_dict.get('title', 'Unknown'),
-                    text=doc_dict.get('contents', ''),
+                    title=_extract_title_from_contents(contents),
+                    text=contents,
                     score=hit.score,
                     rank=rank,
                     source="sparse"
@@ -221,10 +249,11 @@ class DenseRetriever(BaseRetriever):
             try:
                 doc = self.searcher.doc(hit.docid)
                 doc_dict = json.loads(doc.raw())
+                contents = doc_dict.get('contents', '')
                 results.append(RetrievalResult(
                     doc_id=hit.docid,
-                    title=doc_dict.get('title', 'Unknown'),
-                    text=doc_dict.get('contents', ''),
+                    title=_extract_title_from_contents(contents),
+                    text=contents,
                     score=hit.score,
                     rank=rank,
                     source="dense"
