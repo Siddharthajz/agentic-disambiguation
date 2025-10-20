@@ -323,7 +323,7 @@ def main():
         print_evaluation_report(aggregate_metrics)
         
         all_results[mode] = {
-            "config": asdict(args),
+            "config": vars(args),
             "aggregate_metrics": aggregate_metrics,
             "results": [asdict(r) for r in results]
         }
