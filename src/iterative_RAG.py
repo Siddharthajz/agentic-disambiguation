@@ -485,7 +485,7 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=3, help="Maximum number of refinement iterations")
 
     # Performance settings
-    parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--concurrency", type=int, default=5, help="Max concurrent API requests (reduce if hitting rate limits)")
     parser.add_argument("--use-cache", action="store_true", default=False, help="Enable retrieval caching (NOT recommended for benchmarking)")
     parser.add_argument("--no-cache", action="store_false", dest="use_cache", help="Disable retrieval caching (recommended for accurate timing)")
 
@@ -533,12 +533,29 @@ def main():
         logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode\n{'='*60}")
         print_evaluation_report(aggregate_metrics)
 
-        # Save results
-        all_results[mode] = {
+        # Prepare results data
+        mode_results = {
             "config": {**config.to_dict(), "max_iterations": args.max_iterations},
             "aggregate_metrics": aggregate_metrics,
             "results": [r.to_dict() for r in results]
         }
+        all_results[mode] = mode_results
+
+        # Save results immediately after each mode completes
+        output_path = Path(args.output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if args.retrieval_mode == "all":
+            # Save individual mode file
+            mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
+            with open(mode_output, 'w') as f:
+                json.dump(mode_results, f, indent=2)
+            logger.info(f"\n✓ {mode.upper()} results saved to {mode_output}")
+        else:
+            # Save single mode file
+            with open(output_path, 'w') as f:
+                json.dump(mode_results, f, indent=2)
+            logger.info(f"\n✓ Results saved to {output_path}")
 
         # Cleanup
         if args.retrieval_mode == "all":
@@ -549,20 +566,13 @@ def main():
             cache_stats = rag.cache.get_stats()
             logger.info(f"\nCache stats: {cache_stats}")
 
-    # Save results
-    output_path = Path(args.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
+    # Final summary if running all modes
     if args.retrieval_mode == "all":
-        for mode, data in all_results.items():
+        logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
+        logger.info(f"\nAll results saved in: {output_path.parent}")
+        for mode in modes_to_run:
             mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
-            with open(mode_output, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.info(f"\n{mode.upper()} results saved to {mode_output}")
-    else:
-        with open(output_path, 'w') as f:
-            json.dump(all_results[args.retrieval_mode], f, indent=2)
-        logger.info(f"\nResults saved to {output_path}")
+            logger.info(f"  - {mode_output.name}")
 
 
 if __name__ == "__main__":
