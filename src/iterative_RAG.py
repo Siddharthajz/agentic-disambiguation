@@ -65,11 +65,16 @@ class IterativeRAG:
         self.config = config
         self.max_iterations = max_iterations
 
-        # Setup cache
-        self.cache = RetrievalCache(
-            cache_dir=config.cache_dir,
-            enabled=config.use_cache
-        ) if config.use_cache else None
+        # Setup cache - only create if explicitly enabled
+        if config.use_cache:
+            self.cache = RetrievalCache(
+                cache_dir=config.cache_dir,
+                enabled=True
+            )
+            logger.info("Retrieval cache ENABLED")
+        else:
+            self.cache = None
+            logger.info("Retrieval cache DISABLED - all retrievals will be fresh")
 
         # Initialize retriever (lazy loading)
         self.retriever = None
@@ -101,6 +106,7 @@ class IterativeRAG:
             sparse_index=self.config.sparse_index,
             dense_index=self.config.dense_index,
             dense_encoder=self.config.dense_encoder,
+            dense_metadata=self.config.dense_metadata,
             top_k=self.config.top_k,
             cache=self.cache
         )
@@ -143,30 +149,30 @@ Analyze what information might be missing or incomplete in the current answer. G
 3. Be optimized for document retrieval
 4. Be concise (1-2 sentences max)
 
-Reformulated Search Query:"""
+Output ONLY the reformulated search query, nothing else."""
 
         try:
-            # Generate reformulated query using the LLM
-            # Use a simple call without documents
-            from core import RetrievalResult
-
-            # Create a dummy retrieval result with the reformulation prompt
-            dummy_doc = RetrievalResult(
-                doc_id="reformulation",
-                title="Query Reformulation",
-                text=reformulation_prompt,
-                score=1.0,
-                rank=1,
-                source="internal"
+            # Generate reformulated query using direct API call
+            response = await self.generator.client.chat.completions.create(
+                model=self.generator.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that reformulates search queries to find missing information. Respond with only the reformulated query."
+                    },
+                    {
+                        "role": "user",
+                        "content": reformulation_prompt
+                    }
+                ],
+                max_tokens=100,
+                temperature=0.3
             )
 
-            reformulated_query, _, _ = await self.generator.generate(
-                question="Generate a reformulated search query:",
-                retrieved_docs=[dummy_doc]
-            )
+            reformulated_query = response.choices[0].message.content.strip()
 
-            # Clean up the reformulated query
-            reformulated_query = reformulated_query.strip()
+            # Clean up the reformulated query - remove any quotation marks or extra formatting
+            reformulated_query = reformulated_query.strip('"').strip("'").strip()
 
             # If reformulation failed or is too short, fall back to original
             if not reformulated_query or len(reformulated_query) < 10:
@@ -181,19 +187,62 @@ Reformulated Search Query:"""
             # Fall back to original question on error
             return original_question
 
+    def _calculate_progress_score(
+        self,
+        retrieved_docs: List[RetrievalResult],
+        all_previous_docs: List[RetrievalResult]
+    ) -> float:
+        """
+        Calculate progress score based on retrieval quality.
+
+        Inspired by IM-RAG's Progress Tracker, this measures how much new relevant
+        information was retrieved in the current iteration.
+
+        Args:
+            retrieved_docs: Documents retrieved in current iteration
+            all_previous_docs: All documents from previous iterations
+
+        Returns:
+            Progress score between 0 and 1 (higher = more progress)
+        """
+        if not retrieved_docs:
+            return 0.0
+
+        # Calculate average retrieval score
+        avg_score = sum(doc.score for doc in retrieved_docs[:5]) / min(5, len(retrieved_docs))
+
+        # Calculate novelty - how many new documents were found
+        previous_doc_ids = {doc.doc_id for doc in all_previous_docs}
+        new_docs = [doc for doc in retrieved_docs if doc.doc_id not in previous_doc_ids]
+        novelty_ratio = len(new_docs) / len(retrieved_docs) if retrieved_docs else 0.0
+
+        # Combined progress score (weighted average)
+        progress_score = 0.6 * avg_score + 0.4 * novelty_ratio
+
+        return progress_score
+
     async def _should_iterate(
         self,
         answer: str,
         iteration: int,
-        retrieved_docs: List[RetrievalResult]
+        retrieved_docs: List[RetrievalResult],
+        all_previous_docs: List[RetrievalResult] = None,
+        progress_threshold: float = 0.3
     ) -> bool:
         """
         Determine if another iteration is needed based on answer quality and confidence.
 
+        Uses multiple heuristics inspired by iterative RAG papers:
+        - Answer completeness (length, uncertainty markers)
+        - Retrieval progress score (quality + novelty)
+        - Maximum iteration limit
+
         Args:
             answer: Current answer
             iteration: Current iteration number
-            retrieved_docs: Retrieved documents
+            retrieved_docs: Retrieved documents in this iteration
+            all_previous_docs: All documents from previous iterations
+            progress_threshold: Minimum progress score to continue (default 0.3)
 
         Returns:
             True if should continue iterating
@@ -232,17 +281,27 @@ Reformulated Search Query:"""
                 logger.debug(f"Uncertainty marker '{marker}' found in answer, continuing iteration")
                 return True
 
+        # Calculate progress score based on retrieval quality and novelty
+        if all_previous_docs is not None:
+            progress_score = self._calculate_progress_score(retrieved_docs, all_previous_docs)
+            logger.debug(f"Progress score: {progress_score:.3f} (threshold: {progress_threshold})")
+
+            # If progress is very low, retrieval isn't helping - stop iterating
+            if progress_score < progress_threshold and iteration >= 2:
+                logger.debug(f"Low progress score ({progress_score:.3f}), stopping iteration")
+                return False
+
         # Check retrieval quality - if scores are very low, might need better query
         if retrieved_docs:
             avg_score = sum(doc.score for doc in retrieved_docs[:5]) / min(5, len(retrieved_docs))
             # If average score is very low, the retrieval might not be good
-            if avg_score < 0.5:
+            if avg_score < 0.5 and iteration < 2:
                 logger.debug(f"Low retrieval scores (avg={avg_score:.3f}), continuing iteration")
                 return True
 
         # Check answer length - very long answers might be complete
         # Short/medium answers might benefit from more context
-        if len(answer.split()) < 30:
+        if len(answer.split()) < 30 and iteration < 2:
             logger.debug(f"Answer relatively short ({len(answer.split())} words), continuing iteration")
             return True
 
@@ -305,8 +364,14 @@ Reformulated Search Query:"""
 
             best_answer = answer
 
-            # Check if should iterate
-            should_continue = await self._should_iterate(answer, iteration, retrieved_docs)
+            # Check if should iterate (pass previous docs for progress tracking)
+            previous_docs = all_retrieved_docs[:-len(retrieved_docs)] if len(all_retrieved_docs) > len(retrieved_docs) else []
+            should_continue = await self._should_iterate(
+                answer,
+                iteration,
+                retrieved_docs,
+                all_previous_docs=previous_docs
+            )
             if not should_continue:
                 break
 
@@ -407,8 +472,9 @@ def main():
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="sparse", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="wikipedia-dpr-100w.bpr-single-nq")
-    parser.add_argument("--dense-encoder", type=str, default="castorini/bpr-nq-question-encoder")
+    parser.add_argument("--dense-index", type=str, default="ambigqa_wiki.index")
+    parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2")
+    parser.add_argument("--dense-metadata", type=str, default="ambigqa_wiki_metadata.json")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings
@@ -420,8 +486,8 @@ def main():
 
     # Performance settings
     parser.add_argument("--concurrency", type=int, default=10)
-    parser.add_argument("--use-cache", action="store_true", default=True)
-    parser.add_argument("--no-cache", action="store_false", dest="use_cache")
+    parser.add_argument("--use-cache", action="store_true", default=False, help="Enable retrieval caching (NOT recommended for benchmarking)")
+    parser.add_argument("--no-cache", action="store_false", dest="use_cache", help="Disable retrieval caching (recommended for accurate timing)")
 
     # Experiment settings
     parser.add_argument("--limit", type=int, default=None)

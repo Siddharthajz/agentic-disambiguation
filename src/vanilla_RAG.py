@@ -87,6 +87,7 @@ class VanillaRAG:
             sparse_index=self.config.sparse_index,
             dense_index=self.config.dense_index,
             dense_encoder=self.config.dense_encoder,
+            dense_metadata=self.config.dense_metadata,
             top_k=self.config.top_k,
             cache=self.cache
         )
@@ -243,14 +244,20 @@ def main():
     parser.add_argument(
         "--dense-index",
         type=str,
-        default="wikipedia-dpr-100w.bpr-single-nq",
-        help="PySerini FAISS index name"
+        default="ambigqa_wiki.index",
+        help="Path to FAISS index file"
     )
     parser.add_argument(
         "--dense-encoder",
         type=str,
-        default="castorini/bpr-nq-question-encoder",
-        help="Query encoder for FAISS"
+        default="all-MiniLM-L6-v2",
+        help="Sentence-transformers model name for query encoding"
+    )
+    parser.add_argument(
+        "--dense-metadata",
+        type=str,
+        default="ambigqa_wiki_metadata.json",
+        help="Path to metadata JSON file for dense retrieval"
     )
     parser.add_argument(
         "--top-k",
