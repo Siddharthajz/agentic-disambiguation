@@ -4,19 +4,21 @@ Retriever components for RAG systems.
 Provides modular retriever implementations:
 - BaseRetriever: Abstract base class
 - SparseRetriever: BM25 using PySerini/Lucene
-- DenseRetriever: FAISS using PySerini
+- DenseRetriever: FAISS using sentence-transformers
 - HybridRetriever: RRF fusion of sparse + dense
 """
 
 import json
 import time
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any
 
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 from pyserini.search.lucene import LuceneSearcher
-from pyserini.search.faiss import FaissSearcher
-from pyserini.encode import AutoQueryEncoder
 
 from .data_models import RetrievalResult
 from .cache import RetrievalCache
@@ -187,12 +189,13 @@ class SparseRetriever(BaseRetriever):
 
 
 class DenseRetriever(BaseRetriever):
-    """Dense retriever using FAISS and neural encoders."""
+    """Dense retriever using FAISS and sentence-transformers."""
 
     def __init__(
         self,
-        index: str = "wikipedia-dpr-100w.bpr-single-nq",
-        encoder: str = "castorini/bpr-nq-question-encoder",
+        index: str = "ambigqa_wiki.index",
+        encoder: str = "all-MiniLM-L6-v2",
+        metadata_file: str = "ambigqa_wiki_metadata.json",
         top_k: int = 5,
         cache: Optional[RetrievalCache] = None
     ):
@@ -200,28 +203,48 @@ class DenseRetriever(BaseRetriever):
         Initialize dense retriever.
 
         Args:
-            index: PySerini FAISS index name
-            encoder: Query encoder model name
+            index: Path to FAISS index file
+            encoder: Sentence-transformers model name
+            metadata_file: Path to metadata JSON file
             top_k: Number of documents to retrieve
             cache: Optional cache for results
         """
         super().__init__(top_k=top_k, cache=cache)
-        self.index = index
+        self.index_path = index
         self.encoder_name = encoder
+        self.metadata_path = metadata_file
 
         logger.info(f"Loading dense retriever (FAISS): {index}...")
         logger.info(f"Loading query encoder: {encoder}...")
 
-        query_encoder = AutoQueryEncoder(
-            encoder_dir=encoder, pooling='mean', l2_norm=True
-        )
-        self.searcher = FaissSearcher.from_prebuilt_index(index, query_encoder)
+        # Load FAISS index
+        if not os.path.exists(index):
+            raise FileNotFoundError(
+                f"FAISS index not found at {index}. "
+                f"Please run the index building script first: "
+                f"python scripts/build_faiss_index.py --output-dir ./data"
+            )
+        self.index = faiss.read_index(index)
+        logger.info(f"✓ FAISS index loaded with {self.index.ntotal} vectors")
 
+        # Load metadata
+        if not os.path.exists(metadata_file):
+            raise FileNotFoundError(
+                f"Metadata file not found at {metadata_file}. "
+                f"Please run the index building script first: "
+                f"python scripts/build_faiss_index.py --output-dir ./data"
+            )
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            self.metadata = json.load(f)
+        logger.info(f"✓ Loaded metadata for {len(self.metadata)} documents")
+
+        # Load sentence-transformers model
+        self.encoder = SentenceTransformer(encoder)
         logger.info("✓ Dense retriever loaded")
 
     def get_cache_params(self) -> Dict[str, Any]:
         """Get cache parameters."""
-        return {"index": self.index, "encoder": self.encoder_name}
+        return {"index": self.index_path, "encoder": self.encoder_name}
 
     def retrieve(self, query: str, k: Optional[int] = None) -> List[RetrievalResult]:
         """
@@ -241,25 +264,32 @@ class DenseRetriever(BaseRetriever):
         if cached:
             return cached
 
-        # Perform retrieval
-        hits = self.searcher.search(query, k=k)
-        results = []
+        # Encode query and normalize for cosine similarity
+        query_embedding = self.encoder.encode(
+            [query],
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
 
-        for rank, hit in enumerate(hits, 1):
-            try:
-                doc = self.searcher.doc(hit.docid)
-                doc_dict = json.loads(doc.raw())
-                contents = doc_dict.get('contents', '')
-                results.append(RetrievalResult(
-                    doc_id=hit.docid,
-                    title=_extract_title_from_contents(contents),
-                    text=contents,
-                    score=hit.score,
-                    rank=rank,
-                    source="dense"
-                ))
-            except Exception as e:
-                logger.warning(f"Failed to parse document {hit.docid}: {e}")
+        # Perform FAISS search
+        scores, indices = self.index.search(query_embedding, k)
+
+        # Convert to results
+        results = []
+        for rank, (idx, score) in enumerate(zip(indices[0], scores[0]), 1):
+            if idx < 0 or idx >= len(self.metadata):
+                logger.warning(f"Invalid index {idx} returned by FAISS")
+                continue
+
+            doc_metadata = self.metadata[idx]
+            results.append(RetrievalResult(
+                doc_id=str(idx),
+                title=doc_metadata.get('title', 'Unknown'),
+                text=doc_metadata.get('text', ''),
+                score=float(score),
+                rank=rank,
+                source="dense"
+            ))
 
         # Cache results
         self._save_cache(query, k, "dense", results)
@@ -297,7 +327,7 @@ class HybridRetriever(BaseRetriever):
         """Get cache parameters."""
         return {
             "sparse_index": self.sparse_retriever.index,
-            "dense_index": self.dense_retriever.index,
+            "dense_index": self.dense_retriever.index_path,
             "dense_encoder": self.dense_retriever.encoder_name,
             "rrf_k": self.rrf_k
         }
@@ -364,8 +394,9 @@ class HybridRetriever(BaseRetriever):
 def create_retriever(
     mode: str,
     sparse_index: str = "wikipedia-dpr",
-    dense_index: str = "wikipedia-dpr-100w.bpr-single-nq",
-    dense_encoder: str = "castorini/bpr-nq-question-encoder",
+    dense_index: str = "ambigqa_wiki.index",
+    dense_encoder: str = "all-MiniLM-L6-v2",
+    dense_metadata: str = "ambigqa_wiki_metadata.json",
     top_k: int = 5,
     cache: Optional[RetrievalCache] = None
 ) -> BaseRetriever:
@@ -375,8 +406,9 @@ def create_retriever(
     Args:
         mode: "sparse", "dense", or "hybrid"
         sparse_index: BM25 index name
-        dense_index: FAISS index name
-        dense_encoder: Query encoder name
+        dense_index: Path to FAISS index file
+        dense_encoder: Sentence-transformers model name
+        dense_metadata: Path to metadata JSON file
         top_k: Number of documents to retrieve
         cache: Optional cache
 
@@ -387,11 +419,23 @@ def create_retriever(
         return SparseRetriever(index=sparse_index, top_k=top_k, cache=cache)
 
     elif mode == "dense":
-        return DenseRetriever(index=dense_index, encoder=dense_encoder, top_k=top_k, cache=cache)
+        return DenseRetriever(
+            index=dense_index,
+            encoder=dense_encoder,
+            metadata_file=dense_metadata,
+            top_k=top_k,
+            cache=cache
+        )
 
     elif mode == "hybrid":
         sparse = SparseRetriever(index=sparse_index, top_k=top_k, cache=cache)
-        dense = DenseRetriever(index=dense_index, encoder=dense_encoder, top_k=top_k, cache=cache)
+        dense = DenseRetriever(
+            index=dense_index,
+            encoder=dense_encoder,
+            metadata_file=dense_metadata,
+            top_k=top_k,
+            cache=cache
+        )
         return HybridRetriever(sparse, dense, top_k=top_k, cache=cache)
 
     else:

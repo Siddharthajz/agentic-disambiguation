@@ -13,8 +13,9 @@ class RAGConfig:
     # Retrieval settings
     retrieval_mode: str = "sparse"  # "sparse", "dense", "hybrid"
     sparse_index: str = "wikipedia-dpr"
-    dense_index: str = "wikipedia-dpr-100w.bpr-single-nq"
-    dense_encoder: str = "castorini/bpr-nq-question-encoder"
+    dense_index: str = "ambigqa_wiki.index"
+    dense_encoder: str = "all-MiniLM-L6-v2"
+    dense_metadata: str = "ambigqa_wiki_metadata.json"
     top_k: int = 5
 
     # Generation settings
@@ -47,6 +48,7 @@ class RAGConfig:
             "sparse_index": self.sparse_index,
             "dense_index": self.dense_index,
             "dense_encoder": self.dense_encoder,
+            "dense_metadata": self.dense_metadata,
             "top_k": self.top_k,
             "llm_model": self.llm_model,
             "max_tokens": self.max_tokens,
@@ -67,6 +69,7 @@ class RAGConfig:
             sparse_index=args.sparse_index,
             dense_index=args.dense_index,
             dense_encoder=args.dense_encoder,
+            dense_metadata=getattr(args, 'dense_metadata', 'ambigqa_wiki_metadata.json'),
             top_k=args.top_k,
             llm_model=args.model,
             max_tokens=args.max_tokens,
