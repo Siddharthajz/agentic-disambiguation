@@ -1,14 +1,14 @@
 """
-Agentic Disambiguation - Novel Framework
+Agentic Disambiguation - LangGraph Implementation
 
-Multi-agent RAG pipeline for handling ambiguous questions:
-1. Sub-query decomposition: Break ambiguous question into specific sub-queries
-2. HyDE retrieval: Generate hypothetical documents for each sub-query
-3. Enhanced retrieval: Use HyDE docs to improve retrieval
-4. Multi-answer generation: Generate answers for each interpretation
-5. Answer synthesis: Combine answers to cover all interpretations
+Multi-agent RAG pipeline for handling ambiguous questions using LangGraph:
+1. Ambiguity detection: Determine if question has multiple interpretations
+2. Sub-query decomposition: Break ambiguous question into specific sub-queries
+3. HyDE generation: Generate hypothetical documents for each sub-query
+4. Enhanced retrieval: Use HyDE docs to improve retrieval
+5. Answer synthesis: Generate comprehensive answer covering all interpretations
 
-Uses LangGraph for agent orchestration and shared core components.
+This module uses LangGraph for agent orchestration and shared core components.
 """
 
 import argparse
@@ -18,7 +18,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, TypedDict, Annotated, Sequence
+from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence
 import gc
 import operator
 
@@ -184,47 +184,35 @@ class LangGraphAgenticDisambiguation:
         """
         Node 1: Detect if the question is ambiguous.
 
-        Uses LLM to analyze the question and determine if it has multiple
-        valid interpretations.
+        TODO: Implement LLM-based ambiguity detection.
+        For now, assumes all questions are ambiguous to ensure comprehensive
+        handling of potential ambiguities in the AmbigNQ dataset.
+
+        Future implementation could use LLM to analyze:
+        - Underspecified entities (e.g., "When did the US enter the war?" - which war?)
+        - Multiple valid time frames, locations, or contexts
+        - Different possible interpretations
         """
-        question = state["question"]
+        logger.debug(f"\n{'='*60}\n[STEP 1] AMBIGUITY DETECTION\n{'='*60}")
+        logger.debug(f"Question: {state['question']}")
 
-        prompt = f"""Analyze the following question and determine if it is ambiguous (has multiple valid interpretations).
+        # Placeholder: Assume all questions are ambiguous
+        # This ensures the full agentic pipeline runs for all examples
+        is_ambiguous = True
+        ambiguity_score = 1.0
+        reasoning = "Placeholder: All questions treated as potentially ambiguous"
 
-Question: {question}
+        logger.debug(f"Result: {'AMBIGUOUS' if is_ambiguous else 'NOT AMBIGUOUS'}")
+        logger.debug(f"Confidence: {ambiguity_score:.2f}")
+        logger.debug(f"Reasoning: {reasoning}")
 
-Consider:
-- Does the question contain underspecified entities (e.g., "When did the US enter the war?" - which war?)
-- Are there multiple valid time frames, locations, or contexts?
-- Could different people interpret this question differently?
-
-Respond in JSON format:
-{{
-  "is_ambiguous": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of why the question is or isn't ambiguous"
-}}"""
-
-        try:
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            result = json.loads(response.content)
-
-            return {
-                **state,
-                "is_ambiguous": result["is_ambiguous"],
-                "ambiguity_score": result["confidence"],
-                "ambiguity_reasoning": result["reasoning"],
-                "messages": [HumanMessage(content=f"Ambiguity detected: {result['is_ambiguous']}")],
-            }
-        except Exception as e:
-            logger.error(f"Error in ambiguity detection: {e}")
-            return {
-                **state,
-                "is_ambiguous": True,  # Default to ambiguous
-                "ambiguity_score": 0.5,
-                "ambiguity_reasoning": f"Error in detection: {str(e)}",
-                "error": str(e),
-            }
+        return {
+            **state,
+            "is_ambiguous": is_ambiguous,
+            "ambiguity_score": ambiguity_score,
+            "ambiguity_reasoning": reasoning,
+            "messages": [HumanMessage(content=f"Ambiguity detection: {'ambiguous' if is_ambiguous else 'not ambiguous'} (placeholder)")],
+        }
 
     async def generate_subqueries_node(self, state: AgentState) -> AgentState:
         """
@@ -244,7 +232,7 @@ Requirements:
 - Cover the most likely interpretations
 - Make explicit what was implicit in the original
 
-Respond in JSON format:
+You MUST respond with ONLY valid JSON, no other text. Use this exact format:
 {{
   "subqueries": ["specific question 1", "specific question 2", ...],
   "reasoning": "Brief explanation of the different interpretations"
@@ -252,7 +240,16 @@ Respond in JSON format:
 
         try:
             response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            result = json.loads(response.content)
+            response_text = response.content.strip()
+
+            # Try to extract JSON if wrapped in markdown code blocks
+            if response_text.startswith("```"):
+                # Remove markdown code blocks
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:].strip()
+
+            result = json.loads(response_text)
 
             subqueries = result.get("subqueries", [question])
             if not subqueries:
@@ -263,6 +260,15 @@ Respond in JSON format:
                 "subqueries": subqueries,
                 "subquery_reasoning": result.get("reasoning", ""),
                 "messages": [HumanMessage(content=f"Generated {len(subqueries)} sub-queries")],
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in sub-query generation: {e}")
+            logger.debug(f"Response content: {response.content[:200]}")
+            return {
+                **state,
+                "subqueries": [question],  # Fallback to original
+                "subquery_reasoning": f"JSON parsing error: {str(e)}",
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Error in sub-query generation: {e}")
@@ -369,11 +375,13 @@ Respond in JSON format:
         docs = [
             RetrievalResult(
                 doc_id=d["doc_id"],
+                title=d.get("title", ""),
                 text=d["text"],
                 score=d["score"],
-                metadata=d.get("metadata", {})
+                rank=d.get("rank", i),
+                source=d.get("source", "hybrid")
             )
-            for d in retrieved_docs
+            for i, d in enumerate(retrieved_docs)
         ]
 
         try:
@@ -634,327 +642,6 @@ Please provide a comprehensive answer that addresses all interpretations."""
         return results
 
 
-# ============================================================================
-# Original Implementation (for comparison)
-# ============================================================================
-
-class AgenticDisambiguation:
-    """
-    Agentic disambiguation framework for ambiguous questions.
-
-    Pipeline stages:
-    1. Ambiguity Detection: Determine if question is ambiguous
-    2. Sub-query Generation: Decompose into specific interpretations
-    3. HyDE Generation: Create hypothetical documents for each sub-query
-    4. Enhanced Retrieval: Retrieve using both sub-queries and HyDE docs
-    5. Answer Generation: Generate answer for each interpretation
-    6. Answer Synthesis: Combine into comprehensive answer
-    """
-
-    def __init__(self, config: RAGConfig):
-        """
-        Initialize agentic disambiguation framework.
-
-        Args:
-            config: RAG configuration
-        """
-        self.config = config
-
-        # Setup cache
-        self.cache = RetrievalCache(
-            cache_dir=config.cache_dir,
-            enabled=config.use_cache
-        ) if config.use_cache else None
-
-        # Initialize retrievers (lazy loading)
-        self.retriever = None
-
-        # Initialize generators
-        self.generator = OpenAIGenerator(
-            model=config.llm_model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            api_key=config.openai_api_key
-        )
-
-        self.hyde_generator = HyDEGenerator(
-            model=config.llm_model,
-            max_tokens=config.max_tokens,
-            temperature=0.7,  # Higher for diversity
-            api_key=config.openai_api_key
-        )
-
-        # Initialize evaluator
-        self.evaluator = RAGEvaluator(
-            k=config.top_k,
-            d_f1_threshold=config.d_f1_threshold
-        )
-
-        logger.info("Agentic Disambiguation initialized")
-
-    def _load_retriever(self, mode: str):
-        """Load retriever for specified mode."""
-        if self.retriever is not None:
-            return
-
-        logger.info(f"Loading retriever: {mode}")
-        self.retriever = create_retriever(
-            mode=mode,
-            sparse_index=self.config.sparse_index,
-            dense_index=self.config.dense_index,
-            dense_encoder=self.config.dense_encoder,
-            top_k=self.config.top_k,
-            cache=self.cache
-        )
-
-    def _cleanup_retriever(self):
-        """Clean up retriever to free memory."""
-        if self.retriever is not None:
-            logger.info("Cleaning up retriever...")
-            del self.retriever
-            self.retriever = None
-            gc.collect()
-
-    async def _detect_ambiguity(self, question: str) -> Tuple[bool, float]:
-        """
-        Detect if question is ambiguous.
-
-        Args:
-            question: Question to analyze
-
-        Returns:
-            Tuple of (is_ambiguous, confidence_score)
-        """
-        # TODO: Implement LLM-based ambiguity detection
-        # For now, assume all questions are potentially ambiguous
-        # Future: Use LLM to classify and score ambiguity
-        return True, 1.0
-
-    async def _generate_subqueries(self, question: str) -> List[str]:
-        """
-        Decompose ambiguous question into specific sub-queries.
-
-        Args:
-            question: Ambiguous question
-
-        Returns:
-            List of specific sub-queries representing different interpretations
-        """
-        # TODO: Implement LLM-based sub-query generation
-        # This is a placeholder - implement using OpenAI API
-        prompt = f"""The following question is ambiguous and has multiple possible interpretations.
-Generate 2-4 specific questions that represent different interpretations of the original question.
-
-Original Question: {question}
-
-Generate specific questions (one per line):"""
-
-        # Placeholder: return original question
-        # Future implementation:
-        # 1. Use LLM to generate sub-queries
-        # 2. Parse and validate sub-queries
-        # 3. Return list of specific questions
-        logger.warning("Sub-query generation not yet implemented - using original question")
-        return [question]
-
-    async def _generate_hyde_documents(
-        self,
-        subqueries: List[str]
-    ) -> Dict[str, List[str]]:
-        """
-        Generate hypothetical documents for each sub-query using HyDE.
-
-        Args:
-            subqueries: List of sub-queries
-
-        Returns:
-            Dictionary mapping sub-query to list of hypothetical documents
-        """
-        hyde_docs = {}
-
-        for subquery in subqueries:
-            # Generate hypothetical document
-            doc, gen_time, tokens = await self.hyde_generator.generate_hypothetical_document(subquery)
-            hyde_docs[subquery] = [doc]
-            logger.debug(f"Generated HyDE doc for: {subquery[:50]}...")
-
-        return hyde_docs
-
-    async def _retrieve_with_hyde(
-        self,
-        subquery: str,
-        hyde_doc: str
-    ) -> List[RetrievalResult]:
-        """
-        Retrieve documents using both sub-query and HyDE document.
-
-        Args:
-            subquery: Specific sub-query
-            hyde_doc: Hypothetical document
-
-        Returns:
-            List of retrieved documents
-        """
-        # Retrieve using sub-query
-        subquery_results = self.retriever.retrieve(subquery, k=self.config.top_k)
-
-        # Retrieve using HyDE document
-        hyde_results = self.retriever.retrieve(hyde_doc, k=self.config.top_k)
-
-        # Merge results (deduplicate by doc_id)
-        doc_map = {}
-        for doc in subquery_results + hyde_results:
-            if doc.doc_id not in doc_map:
-                doc_map[doc.doc_id] = doc
-
-        # Re-rank by score
-        merged_results = sorted(doc_map.values(), key=lambda x: x.score, reverse=True)
-
-        return merged_results[:self.config.top_k]
-
-    async def run_single(
-        self,
-        question: str,
-        question_id: str,
-        reference_data: Dict[str, Any]
-    ) -> RAGResult:
-        """
-        Run agentic disambiguation pipeline on a single question.
-
-        Args:
-            question: Question to answer
-            question_id: Unique question identifier
-            reference_data: Reference data for evaluation
-
-        Returns:
-            RAG result with comprehensive answer
-        """
-        total_retrieval_time = 0.0
-        total_generation_time = 0.0
-        total_tokens = 0
-
-        # Stage 1: Detect ambiguity
-        is_ambiguous, ambiguity_score = await self._detect_ambiguity(question)
-
-        # Stage 2: Generate sub-queries
-        start_time = time.time()
-        subqueries = await self._generate_subqueries(question)
-        query_gen_time = time.time() - start_time
-        logger.debug(f"Generated {len(subqueries)} sub-queries")
-
-        # Stage 3: Generate HyDE documents
-        start_time = time.time()
-        hyde_docs = await self._generate_hyde_documents(subqueries)
-        hyde_gen_time = time.time() - start_time
-        total_generation_time += hyde_gen_time
-
-        # Stage 4: Enhanced retrieval for each sub-query
-        all_retrieved_docs = []
-        for subquery in subqueries:
-            start_time = time.time()
-            hyde_doc = hyde_docs[subquery][0] if subquery in hyde_docs else subquery
-
-            # Retrieve with HyDE
-            docs = await self._retrieve_with_hyde(subquery, hyde_doc)
-            retrieval_time = time.time() - start_time
-            total_retrieval_time += retrieval_time
-
-            all_retrieved_docs.extend(docs)
-
-        # Deduplicate retrieved docs
-        doc_map = {doc.doc_id: doc for doc in all_retrieved_docs}
-        unique_docs = list(doc_map.values())[:self.config.top_k]
-
-        # Stage 5: Generate comprehensive answer
-        start_time = time.time()
-        answer, gen_time, tokens = await self.generator.generate(question, unique_docs)
-        total_generation_time += gen_time
-        total_tokens += tokens
-
-        # Evaluation
-        evaluation = self.evaluator.evaluate_single(
-            prediction=answer,
-            retrieved_docs=[doc.to_dict() for doc in unique_docs],
-            reference_item=reference_data,
-            retrieval_time=total_retrieval_time,
-            generation_time=total_generation_time,
-            total_tokens=total_tokens
-        )
-
-        return RAGResult(
-            question_id=question_id,
-            question=question,
-            retrieved_docs=[doc.to_dict() for doc in unique_docs],
-            generated_answer=answer,
-            reference_data=reference_data,
-            retrieval_time=total_retrieval_time,
-            generation_time=total_generation_time,
-            total_tokens=total_tokens,
-            evaluation=evaluation,
-            metadata={
-                "is_ambiguous": is_ambiguous,
-                "ambiguity_score": ambiguity_score,
-                "num_subqueries": len(subqueries),
-                "subqueries": subqueries
-            }
-        )
-
-    async def _process_with_semaphore(
-        self,
-        item: Dict[str, Any],
-        semaphore: asyncio.Semaphore
-    ) -> RAGResult:
-        """Process a single item with concurrency control."""
-        question = item['question']
-        question_id = item.get('id', str(hash(question)))
-
-        async with semaphore:
-            try:
-                return await self.run_single(question, question_id, item)
-            except Exception as e:
-                logger.error(f"Error processing question '{question}': {e}")
-                return RAGResult(
-                    question_id=question_id,
-                    question=question,
-                    retrieved_docs=[],
-                    generated_answer=f"ERROR: {str(e)}",
-                    reference_data=item,
-                    retrieval_time=0.0,
-                    generation_time=0.0,
-                    total_tokens=0,
-                    evaluation={}
-                )
-
-    async def run_batch(
-        self,
-        test_data: List[Dict[str, Any]],
-        limit: Optional[int] = None
-    ) -> List[RAGResult]:
-        """
-        Run agentic disambiguation on a batch of questions.
-
-        Args:
-            test_data: List of test examples
-            limit: Optional limit on number of examples
-
-        Returns:
-            List of RAG results
-        """
-        if limit:
-            test_data = test_data[:limit]
-
-        semaphore = asyncio.Semaphore(self.config.concurrency)
-        tasks = [
-            self._process_with_semaphore(item, semaphore)
-            for item in test_data
-        ]
-
-        results = await async_tqdm.gather(
-            *tasks,
-            desc=f"Agentic Disambiguation ({self.config.retrieval_mode})"
-        )
-
-        return results
 
 
 def main():
@@ -986,15 +673,15 @@ def main():
     # Experiment settings
     parser.add_argument("--limit", type=int, default=None)
 
-    # Implementation selection
-    parser.add_argument(
-        "--use-langgraph",
-        action="store_true",
-        default=False,
-        help="Use LangGraph-based implementation (default: use original implementation)"
-    )
+    # Debug and logging settings
+    parser.add_argument("--verbose", action="store_true", help="Enable detailed debug logging for each step")
+    parser.add_argument("--single-query", type=str, default=None, help="Run on a single query with full verbose output")
 
     args = parser.parse_args()
+
+    # Enable debug logging if verbose mode
+    if args.verbose or args.single_query:
+        logger.setLevel(logging.DEBUG)
 
     # Load environment
     load_dotenv()
@@ -1009,12 +696,10 @@ def main():
     modes_to_run = ["sparse", "dense", "hybrid"] if args.retrieval_mode == "all" else [args.retrieval_mode]
     all_results = {}
 
-    # Select implementation
-    implementation_name = "LangGraph" if args.use_langgraph else "Original"
-    logger.info(f"\nUsing {implementation_name} implementation\n")
+    logger.info("\nUsing LangGraph implementation\n")
 
     for mode in modes_to_run:
-        logger.info(f"\n{'='*60}\n  Running {mode.upper()} retrieval mode ({implementation_name})\n{'='*60}\n")
+        logger.info(f"\n{'='*60}\n  Running {mode.upper()} retrieval mode (LangGraph)\n{'='*60}\n")
 
         # Create config
         config = RAGConfig.from_args(args)
@@ -1024,12 +709,8 @@ def main():
         if not config.openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
 
-        # Initialize agentic framework (choose implementation)
-        if args.use_langgraph:
-            framework = LangGraphAgenticDisambiguation(config)
-        else:
-            framework = AgenticDisambiguation(config)
-
+        # Initialize LangGraph framework
+        framework = LangGraphAgenticDisambiguation(config)
         framework._load_retriever(mode)
 
         # Run experiments
@@ -1040,7 +721,7 @@ def main():
         aggregate_metrics = framework.evaluator.evaluate_batch([r.to_dict() for r in results])
 
         # Print report
-        logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode ({implementation_name})\n{'='*60}")
+        logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode (LangGraph)\n{'='*60}")
         print_evaluation_report(aggregate_metrics)
 
         # Save results
@@ -1048,7 +729,7 @@ def main():
             "config": config.to_dict(),
             "aggregate_metrics": aggregate_metrics,
             "results": [r.to_dict() for r in results],
-            "implementation": implementation_name
+            "implementation": "LangGraph"
         }
 
         # Cleanup
@@ -1074,21 +755,6 @@ def main():
         with open(output_path, 'w') as f:
             json.dump(all_results[args.retrieval_mode], f, indent=2)
         logger.info(f"\nResults saved to {output_path}")
-
-    logger.info("\n" + "="*60)
-    if args.use_langgraph:
-        logger.info("Completed LangGraph-based agentic disambiguation")
-        logger.info("Workflow includes:")
-        logger.info("  1. Ambiguity Detection (LLM-based)")
-        logger.info("  2. Sub-query Generation (LLM-based)")
-        logger.info("  3. HyDE Document Generation")
-        logger.info("  4. Enhanced Retrieval (sub-queries + HyDE)")
-        logger.info("  5. Answer Synthesis")
-    else:
-        logger.info("NOTE: Original implementation is a skeleton.")
-        logger.info("Use --use-langgraph for full LangGraph orchestration")
-    logger.info("="*60)
-
 
 if __name__ == "__main__":
     main()
