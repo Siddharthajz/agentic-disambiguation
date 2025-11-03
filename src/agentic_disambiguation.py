@@ -39,7 +39,10 @@ from core import (
     LlamaCppGenerator,
     LLAMA_CPP_AVAILABLE,
     RAGResult,
-    RetrievalResult
+    RetrievalResult,
+    get_model_name_from_config,
+    get_organized_output_path,
+    ensure_output_directory
 )
 from evaluation import RAGEvaluator, print_evaluation_report
 
@@ -698,7 +701,7 @@ def main():
 
     # Data paths
     parser.add_argument("--data-path", type=str, default="data/ambignq_test.json")
-    parser.add_argument("--output-path", type=str, default="results/agentic_disambiguation_results.json")
+    parser.add_argument("--output-path", type=str, default=None, help="Path to save results (default: organized by approach/mode/model)")
 
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="hybrid", choices=["sparse", "dense", "hybrid", "all"])
@@ -797,16 +800,44 @@ def main():
             logger.info(f"\nCache stats: {cache_stats}")
 
     # Save results
-    output_path = Path(args.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     if args.retrieval_mode == "all":
         for mode, data in all_results.items():
-            mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
+            # Use organized path if custom output path not specified
+            if args.output_path is None:
+                model_name = get_model_name_from_config(data["config"])
+                is_test = args.limit is not None and args.limit < 100
+                mode_output = get_organized_output_path(
+                    approach="agentic",
+                    retrieval_mode=mode,
+                    model_name=model_name,
+                    is_test=is_test
+                )
+                ensure_output_directory(mode_output)
+            else:
+                output_path = Path(args.output_path)
+                mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+
             with open(mode_output, 'w') as f:
                 json.dump(data, f, indent=2)
             logger.info(f"\n{mode.upper()} results saved to {mode_output}")
     else:
+        # Use organized path if custom output path not specified
+        if args.output_path is None:
+            data = all_results[args.retrieval_mode]
+            model_name = get_model_name_from_config(data["config"])
+            is_test = args.limit is not None and args.limit < 100
+            output_path = get_organized_output_path(
+                approach="agentic",
+                retrieval_mode=args.retrieval_mode,
+                model_name=model_name,
+                is_test=is_test
+            )
+            ensure_output_directory(output_path)
+        else:
+            output_path = Path(args.output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(output_path, 'w') as f:
             json.dump(all_results[args.retrieval_mode], f, indent=2)
         logger.info(f"\nResults saved to {output_path}")

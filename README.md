@@ -325,14 +325,13 @@ This runs the full agentic pipeline on one question with detailed logging.
 python src/vanilla_RAG.py \
   --retrieval-mode all \
   --data-path data/ambignq_test.json \
-  --output-path results/vanilla_rag.json \
   --limit 300
 ```
 
-Creates three result files:
-- `results/vanilla_rag_sparse.json`
-- `results/vanilla_rag_dense.json`
-- `results/vanilla_rag_hybrid.json`
+Results automatically saved to organized structure:
+- `results/vanilla/sparse/gpt-4o-mini/results.json`
+- `results/vanilla/dense/gpt-4o-mini/results.json`
+- `results/vanilla/hybrid/gpt-4o-mini/results.json`
 
 ### Example 2: Iterative RAG with Hybrid Retrieval
 
@@ -340,9 +339,10 @@ Creates three result files:
 python src/iterative_RAG.py \
   --retrieval-mode hybrid \
   --max-iterations 3 \
-  --limit 50 \
-  --output-path results/iterative_hybrid.json
+  --limit 50
 ```
+
+Results saved to: `results/iterative/hybrid/gpt-4o-mini/results_test.json`
 
 ### Example 3: Agentic RAG (Recommended)
 
@@ -350,9 +350,10 @@ python src/iterative_RAG.py \
 python src/agentic_disambiguation.py \
   --retrieval-mode hybrid \
   --limit 50 \
-  --output-path results/agentic_hybrid.json \
   --verbose
 ```
+
+Results saved to: `results/agentic/hybrid/gpt-4o-mini/results_test.json`
 
 ### Example 4: Using Local LLM (No API Key Required)
 
@@ -361,9 +362,10 @@ python src/agentic_disambiguation.py \
   --use-local-llm \
   --retrieval-mode sparse \
   --limit 10 \
-  --output-path results/agentic_local.json \
   --verbose
 ```
+
+Results saved to: `results/agentic/sparse/qwen3-4b-q4/results_test.json`
 
 ### Example 5: Custom Configuration
 
@@ -383,9 +385,9 @@ python src/vanilla_RAG.py \
 
 ```bash
 python src/compare_results.py \
-  --vanilla results/vanilla_rag_sparse.json \
-  --iterative results/iterative_rag_sparse.json \
-  --agentic results/agentic_disambiguation_results_hybrid.json \
+  --vanilla results/vanilla/sparse/gpt-4o-mini/results.json \
+  --iterative results/iterative/sparse/gpt-4o-mini/results.json \
+  --agentic results/agentic/hybrid/gpt-4o-mini/results.json \
   --output results/comparison.json \
   --baseline vanilla
 ```
@@ -400,7 +402,8 @@ agentic-disambiguation/
 │   │   ├── config.py             # RAGConfig for unified configuration
 │   │   ├── cache.py              # RetrievalCache for caching
 │   │   ├── retrievers.py         # BaseRetriever + implementations
-│   │   └── generators.py         # BaseGenerator + implementations
+│   │   ├── generators.py         # BaseGenerator + implementations
+│   │   └── output_utils.py       # Organized output path utilities
 │   │
 │   ├── vanilla_RAG.py            # Baseline: Standard RAG
 │   ├── iterative_RAG.py          # Baseline: Multi-round refinement
@@ -417,9 +420,18 @@ agentic-disambiguation/
 │
 ├── scripts/
 │   ├── build_faiss_index.py      # Build FAISS index from embeddings
-│   └── download_local_model.py   # Download local LLM models
+│   ├── download_local_model.py   # Download local LLM models
+│   ├── reorganize_results.py     # Reorganize legacy results
+│   └── visualize_langgraph.py    # Visualize LangGraph workflow
 │
-├── results/                       # Output directory for experiments
+├── results/                       # Organized experiment results
+│   ├── vanilla/                   # by approach
+│   │   ├── sparse/               # by retrieval mode
+│   │   │   └── gpt-4o-mini/      # by model
+│   │   ├── dense/
+│   │   └── hybrid/
+│   ├── iterative/
+│   └── agentic/
 ├── models/                        # Local LLM models (if using)
 ├── .cache/                        # Retrieval cache directory
 ├── requirements.txt               # Python dependencies

@@ -19,6 +19,11 @@ from .retrievers import (
 from .generators import BaseGenerator, OpenAIGenerator, HyDEGenerator, LlamaCppGenerator, LLAMA_CPP_AVAILABLE
 from .cache import RetrievalCache
 from .config import RAGConfig
+from .output_utils import (
+    get_model_name_from_config,
+    get_organized_output_path,
+    ensure_output_directory
+)
 
 __all__ = [
     "RetrievalResult",
@@ -35,4 +40,7 @@ __all__ = [
     "LLAMA_CPP_AVAILABLE",
     "RetrievalCache",
     "RAGConfig",
+    "get_model_name_from_config",
+    "get_organized_output_path",
+    "ensure_output_directory",
 ]
