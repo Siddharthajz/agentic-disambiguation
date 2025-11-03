@@ -193,9 +193,9 @@ class DenseRetriever(BaseRetriever):
 
     def __init__(
         self,
-        index: str = "ambigqa_wiki.index",
+        index: str = "data/ambigqa_wiki.index",
         encoder: str = "all-MiniLM-L6-v2",
-        metadata_file: str = "ambigqa_wiki_metadata.json",
+        metadata_file: str = "data/ambigqa_wiki_metadata.json",
         top_k: int = 5,
         cache: Optional[RetrievalCache] = None
     ):
@@ -394,9 +394,9 @@ class HybridRetriever(BaseRetriever):
 def create_retriever(
     mode: str,
     sparse_index: str = "wikipedia-dpr",
-    dense_index: str = "ambigqa_wiki.index",
+    dense_index: str = "data/ambigqa_wiki.index",
     dense_encoder: str = "all-MiniLM-L6-v2",
-    dense_metadata: str = "ambigqa_wiki_metadata.json",
+    dense_metadata: str = "data/ambigqa_wiki_metadata.json",
     top_k: int = 5,
     cache: Optional[RetrievalCache] = None
 ) -> BaseRetriever:

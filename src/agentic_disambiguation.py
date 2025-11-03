@@ -36,6 +36,8 @@ from core import (
     create_retriever,
     OpenAIGenerator,
     HyDEGenerator,
+    LlamaCppGenerator,
+    LLAMA_CPP_AVAILABLE,
     RAGResult,
     RetrievalResult
 )
@@ -120,27 +122,59 @@ class LangGraphAgenticDisambiguation:
         # Initialize retrievers (lazy loading)
         self.retriever = None
 
-        # Initialize LangChain LLM
-        self.llm = ChatOpenAI(
-            model=config.llm_model,
-            temperature=config.temperature,
-            api_key=config.openai_api_key
-        )
+        # Check if using local LLM
+        if config.use_local_llm:
+            if not LLAMA_CPP_AVAILABLE:
+                raise RuntimeError(
+                    "llama-cpp-python is not installed. "
+                    "Install with: pip install llama-cpp-python"
+                )
 
-        # Initialize generators (for HyDE and final answer)
-        self.generator = OpenAIGenerator(
-            model=config.llm_model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            api_key=config.openai_api_key
-        )
+            logger.info("Initializing with LOCAL LLM (llama.cpp)")
+            logger.info(f"Model path: {config.local_model_path}")
 
-        self.hyde_generator = HyDEGenerator(
-            model=config.llm_model,
-            max_tokens=config.max_tokens,
-            temperature=0.7,
-            api_key=config.openai_api_key
-        )
+            # Initialize single local LLM generator (shared for all tasks)
+            # Using a single instance avoids memory issues with llama.cpp
+            self.generator = LlamaCppGenerator(
+                model_path=config.local_model_path,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                n_ctx=config.local_context_size,
+                n_gpu_layers=config.local_gpu_layers,
+                verbose=False
+            )
+
+            # Reuse the same generator for HyDE (just change temperature at call time)
+            # This avoids loading the model twice
+            self.hyde_generator = self.generator
+
+            # For sub-query generation, we'll use the local LLM directly in the node
+            self.llm = None  # Will handle manually in generate_subqueries_node
+
+        else:
+            logger.info("Initializing with OpenAI API")
+
+            # Initialize LangChain LLM
+            self.llm = ChatOpenAI(
+                model=config.llm_model,
+                temperature=config.temperature,
+                api_key=config.openai_api_key
+            )
+
+            # Initialize OpenAI generators
+            self.generator = OpenAIGenerator(
+                model=config.llm_model,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                api_key=config.openai_api_key
+            )
+
+            self.hyde_generator = HyDEGenerator(
+                model=config.llm_model,
+                max_tokens=config.max_tokens,
+                temperature=0.7,
+                api_key=config.openai_api_key
+            )
 
         # Initialize evaluator
         self.evaluator = RAGEvaluator(
@@ -239,8 +273,20 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
 }}"""
 
         try:
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            response_text = response.content.strip()
+            # Handle local LLM vs OpenAI
+            if self.config.use_local_llm:
+                # Use local LLM directly (synchronous, but wrapped in executor)
+                loop = asyncio.get_event_loop()
+                response_text, _ = await loop.run_in_executor(
+                    None,
+                    self.generator._generate_sync,
+                    prompt,
+                    None  # No system prompt
+                )
+            else:
+                # Use LangChain OpenAI
+                response = await self.llm.ainvoke([HumanMessage(content=prompt)])
+                response_text = response.content.strip()
 
             # Try to extract JSON if wrapped in markdown code blocks
             if response_text.startswith("```"):
@@ -657,13 +703,20 @@ def main():
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="hybrid", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="wikipedia-dpr-100w.bpr-single-nq")
-    parser.add_argument("--dense-encoder", type=str, default="castorini/bpr-nq-question-encoder")
+    parser.add_argument("--dense-index", type=str, default="data/ambigqa_wiki.index", help="Path to FAISS index file")
+    parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2", help="Sentence-transformers model name for query encoding")
+    parser.add_argument("--dense-metadata", type=str, default="data/ambigqa_wiki_metadata.json", help="Path to metadata JSON file for dense retrieval")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings
     parser.add_argument("--model", type=str, default="gpt-4o-mini")
     parser.add_argument("--max-tokens", type=int, default=200)
+
+    # Local LLM settings (optional - no API required)
+    parser.add_argument("--use-local-llm", action="store_true", help="Use local LLM via llama.cpp instead of OpenAI API")
+    parser.add_argument("--local-model-path", type=str, default="models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", help="Path to GGUF model file")
+    parser.add_argument("--local-context-size", type=int, default=8192, help="Context window size for local LLM")
+    parser.add_argument("--local-gpu-layers", type=int, default=-1, help="GPU layers to offload (-1 for all, uses Metal on M1)")
 
     # Performance settings
     parser.add_argument("--concurrency", type=int, default=10)
@@ -704,10 +757,12 @@ def main():
         # Create config
         config = RAGConfig.from_args(args)
         config.retrieval_mode = mode
-        config.openai_api_key = os.getenv("OPENAI_API_KEY")
 
-        if not config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
+        # Only require OpenAI API key if not using local LLM
+        if not args.use_local_llm:
+            config.openai_api_key = os.getenv("OPENAI_API_KEY")
+            if not config.openai_api_key:
+                raise ValueError("OPENAI_API_KEY environment variable not set. Use --use-local-llm to run without API.")
 
         # Initialize LangGraph framework
         framework = LangGraphAgenticDisambiguation(config)

@@ -472,9 +472,9 @@ def main():
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="sparse", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="ambigqa_wiki.index")
+    parser.add_argument("--dense-index", type=str, default="data/ambigqa_wiki.index")
     parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2")
-    parser.add_argument("--dense-metadata", type=str, default="ambigqa_wiki_metadata.json")
+    parser.add_argument("--dense-metadata", type=str, default="data/ambigqa_wiki_metadata.json")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings

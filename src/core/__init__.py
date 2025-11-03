@@ -16,7 +16,7 @@ from .retrievers import (
     HybridRetriever,
     create_retriever
 )
-from .generators import BaseGenerator, OpenAIGenerator, HyDEGenerator
+from .generators import BaseGenerator, OpenAIGenerator, HyDEGenerator, LlamaCppGenerator, LLAMA_CPP_AVAILABLE
 from .cache import RetrievalCache
 from .config import RAGConfig
 
@@ -31,6 +31,8 @@ __all__ = [
     "BaseGenerator",
     "OpenAIGenerator",
     "HyDEGenerator",
+    "LlamaCppGenerator",
+    "LLAMA_CPP_AVAILABLE",
     "RetrievalCache",
     "RAGConfig",
 ]

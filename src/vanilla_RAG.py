@@ -25,6 +25,7 @@ from core import (
     OpenAIGenerator,
     RAGResult
 )
+from core.generators import LlamaCppGenerator
 from evaluation import RAGEvaluator, print_evaluation_report
 
 # Setup logging
@@ -42,12 +43,17 @@ class VanillaRAG:
     Pipeline: Retrieve relevant documents → Generate answer
     """
 
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: RAGConfig, use_local_llm: bool = False, local_model_path: str = None,
+                 local_context_size: int = 4096, local_gpu_layers: int = -1):
         """
         Initialize vanilla RAG pipeline.
 
         Args:
             config: RAG configuration
+            use_local_llm: Whether to use local LLM instead of OpenAI
+            local_model_path: Path to local GGUF model file
+            local_context_size: Context window size for local LLM
+            local_gpu_layers: GPU layers to offload (-1 for all)
         """
         self.config = config
 
@@ -61,12 +67,24 @@ class VanillaRAG:
         self.retriever = None
 
         # Initialize generator
-        self.generator = OpenAIGenerator(
-            model=config.llm_model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            api_key=config.openai_api_key
-        )
+        if use_local_llm:
+            if local_model_path is None:
+                local_model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+            logger.info(f"Using local LLM: {local_model_path}")
+            self.generator = LlamaCppGenerator(
+                model_path=local_model_path,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                n_ctx=local_context_size,
+                n_gpu_layers=local_gpu_layers
+            )
+        else:
+            self.generator = OpenAIGenerator(
+                model=config.llm_model,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                api_key=config.openai_api_key
+            )
 
         # Initialize evaluator
         self.evaluator = RAGEvaluator(
@@ -244,7 +262,7 @@ def main():
     parser.add_argument(
         "--dense-index",
         type=str,
-        default="ambigqa_wiki.index",
+        default="data/ambigqa_wiki.index",
         help="Path to FAISS index file"
     )
     parser.add_argument(
@@ -256,7 +274,7 @@ def main():
     parser.add_argument(
         "--dense-metadata",
         type=str,
-        default="ambigqa_wiki_metadata.json",
+        default="data/ambigqa_wiki_metadata.json",
         help="Path to metadata JSON file for dense retrieval"
     )
     parser.add_argument(
@@ -278,6 +296,31 @@ def main():
         type=int,
         default=200,
         help="Max tokens for generation"
+    )
+
+    # Local LLM settings
+    parser.add_argument(
+        "--use-local-llm",
+        action="store_true",
+        help="Use local LLM via llama.cpp instead of OpenAI API"
+    )
+    parser.add_argument(
+        "--local-model-path",
+        type=str,
+        default="models/qwen2.5-3b-instruct-q4_k_m.gguf",
+        help="Path to local GGUF model file"
+    )
+    parser.add_argument(
+        "--local-context-size",
+        type=int,
+        default=4096,
+        help="Context window size for local LLM"
+    )
+    parser.add_argument(
+        "--local-gpu-layers",
+        type=int,
+        default=-1,
+        help="Number of GPU layers to offload (-1 for all, uses Metal on M1)"
     )
 
     # Performance settings
@@ -329,13 +372,21 @@ def main():
         # Create config
         config = RAGConfig.from_args(args)
         config.retrieval_mode = mode
-        config.openai_api_key = os.getenv("OPENAI_API_KEY")
 
-        if not config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
+        # Only require API key if not using local LLM
+        if not args.use_local_llm:
+            config.openai_api_key = os.getenv("OPENAI_API_KEY")
+            if not config.openai_api_key:
+                raise ValueError("OPENAI_API_KEY environment variable not set")
 
         # Initialize RAG
-        rag = VanillaRAG(config)
+        rag = VanillaRAG(
+            config=config,
+            use_local_llm=args.use_local_llm,
+            local_model_path=args.local_model_path,
+            local_context_size=args.local_context_size,
+            local_gpu_layers=args.local_gpu_layers
+        )
 
         # Load retriever for this mode
         rag._load_retriever(mode)
