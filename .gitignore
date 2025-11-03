@@ -207,3 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 .DS_Store
+CLAUDE.md
+.claude
+data/ambigqa_wiki_metadata.json
+data/ambigqa_wiki.index
+data/wiki_minilm.ndjson

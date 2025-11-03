@@ -29,7 +29,10 @@ from core import (
     create_retriever,
     OpenAIGenerator,
     RAGResult,
-    RetrievalResult
+    RetrievalResult,
+    get_model_name_from_config,
+    get_organized_output_path,
+    ensure_output_directory
 )
 from evaluation import RAGEvaluator, print_evaluation_report
 
@@ -467,14 +470,14 @@ def main():
 
     # Data paths
     parser.add_argument("--data-path", type=str, default="data/ambignq_test.json")
-    parser.add_argument("--output-path", type=str, default="results/iterative_rag_results.json")
+    parser.add_argument("--output-path", type=str, default=None, help="Path to save results (default: organized by approach/mode/model)")
 
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="sparse", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="ambigqa_wiki.index")
+    parser.add_argument("--dense-index", type=str, default="data/ambigqa_wiki.index")
     parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2")
-    parser.add_argument("--dense-metadata", type=str, default="ambigqa_wiki_metadata.json")
+    parser.add_argument("--dense-metadata", type=str, default="data/ambigqa_wiki_metadata.json")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings
@@ -542,20 +545,27 @@ def main():
         all_results[mode] = mode_results
 
         # Save results immediately after each mode completes
-        output_path = Path(args.output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if args.retrieval_mode == "all":
-            # Save individual mode file
-            mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
-            with open(mode_output, 'w') as f:
-                json.dump(mode_results, f, indent=2)
-            logger.info(f"\n✓ {mode.upper()} results saved to {mode_output}")
+        if args.output_path is None:
+            # Use organized path
+            model_name = get_model_name_from_config(mode_results["config"])
+            is_test = args.limit is not None and args.limit < 100
+            output_path = get_organized_output_path(
+                approach="iterative",
+                retrieval_mode=mode,
+                model_name=model_name,
+                is_test=is_test
+            )
+            ensure_output_directory(output_path)
         else:
-            # Save single mode file
-            with open(output_path, 'w') as f:
-                json.dump(mode_results, f, indent=2)
-            logger.info(f"\n✓ Results saved to {output_path}")
+            # Use custom path
+            output_path = Path(args.output_path)
+            if args.retrieval_mode == "all":
+                output_path = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w') as f:
+            json.dump(mode_results, f, indent=2)
+        logger.info(f"\n✓ {mode.upper() if args.retrieval_mode == 'all' else ''} Results saved to {output_path}")
 
         # Cleanup
         if args.retrieval_mode == "all":

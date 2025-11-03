@@ -1,0 +1,9 @@
+# Ignore all model files (they're large)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# But track this .gitignore
+!.gitignore
