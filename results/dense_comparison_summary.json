@@ -1,0 +1,38 @@
+{
+  "approaches": [
+    "vanilla",
+    "agentic"
+  ],
+  "metrics": {
+    "vanilla": {
+      "mean_f1": 0.4197356764839715,
+      "mean_d_f1": 0.2783554175293306,
+      "mean_ndcg@5": 0.24948784365573157,
+      "mean_recall@5": 0.06935908888220195,
+      "mean_retrieval_time": 0.03978028535842895,
+      "mean_generation_time": 0.7114460508028666,
+      "mean_total_time": 0.7512263361612955,
+      "total_tokens": 206581,
+      "num_examples": 300,
+      "coverage_rate": 0.21514312096029548
+    },
+    "agentic": {
+      "mean_f1": 0.42462689391116604,
+      "mean_d_f1": 0.2668512767425811,
+      "mean_ndcg@5": 0.30296806634692636,
+      "mean_recall@5": 0.08182451654736174,
+      "mean_retrieval_time": 0.15657764514287312,
+      "mean_generation_time": 1.3088863436381022,
+      "mean_total_time": 1.4654639887809753,
+      "total_tokens": 236251,
+      "num_examples": 300,
+      "coverage_rate": 0.19390581717451524
+    }
+  },
+  "analysis": {
+    "best_answer_quality": "agentic",
+    "best_ambiguity_handling": "vanilla",
+    "best_efficiency": "vanilla",
+    "lowest_cost": "vanilla"
+  }
+}

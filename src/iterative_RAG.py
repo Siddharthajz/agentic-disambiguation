@@ -32,7 +32,11 @@ from core import (
     RetrievalResult,
     get_model_name_from_config,
     get_organized_output_path,
-    ensure_output_directory
+    ensure_output_directory,
+    load_existing_results,
+    get_processed_question_ids,
+    filter_unprocessed_data,
+    merge_results
 )
 from evaluation import RAGEvaluator, print_evaluation_report
 
@@ -525,29 +529,9 @@ def main():
         rag = IterativeRAG(config, max_iterations=args.max_iterations)
         rag._load_retriever(mode)
 
-        # Run experiments
-        results = asyncio.run(rag.run_batch(test_data, limit=args.limit))
-
-        # Compute metrics
-        logger.info(f"\nComputing aggregate metrics for {mode}...")
-        aggregate_metrics = rag.evaluator.evaluate_batch([r.to_dict() for r in results])
-
-        # Print report
-        logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode\n{'='*60}")
-        print_evaluation_report(aggregate_metrics)
-
-        # Prepare results data
-        mode_results = {
-            "config": {**config.to_dict(), "max_iterations": args.max_iterations},
-            "aggregate_metrics": aggregate_metrics,
-            "results": [r.to_dict() for r in results]
-        }
-        all_results[mode] = mode_results
-
-        # Save results immediately after each mode completes
+        # Determine output path for resume capability
         if args.output_path is None:
-            # Use organized path
-            model_name = get_model_name_from_config(mode_results["config"])
+            model_name = get_model_name_from_config(config.to_dict())
             is_test = args.limit is not None and args.limit < 100
             output_path = get_organized_output_path(
                 approach="iterative",
@@ -555,16 +539,52 @@ def main():
                 model_name=model_name,
                 is_test=is_test
             )
-            ensure_output_directory(output_path)
         else:
-            # Use custom path
             output_path = Path(args.output_path)
             if args.retrieval_mode == "all":
                 output_path = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Check for existing results and filter test data
+        existing_results = load_existing_results(output_path)
+        if existing_results:
+            processed_ids = get_processed_question_ids(existing_results)
+            original_count = len(test_data)
+            test_data = filter_unprocessed_data(test_data, processed_ids)
+            if len(test_data) < original_count:
+                logger.info(f"Resuming: {len(processed_ids)} already processed, {len(test_data)} remaining")
+            else:
+                logger.info(f"Existing results found but no overlap, starting fresh")
+        else:
+            logger.info(f"Starting new experiment")
 
+        # Run experiments (only on unprocessed data)
+        if test_data:
+            results = asyncio.run(rag.run_batch(test_data, limit=args.limit))
+            new_results = [r.to_dict() for r in results]
+        else:
+            logger.info(f"All items already processed, skipping run")
+            new_results = []
+
+        # Merge with existing results
+        config_dict = {**config.to_dict(), "max_iterations": args.max_iterations}
+        merged_data = merge_results(existing_results, new_results, config_dict)
+
+        # Recompute aggregate metrics on merged results
+        logger.info(f"\nComputing aggregate metrics for {mode}...")
+        aggregate_metrics = rag.evaluator.evaluate_batch(merged_data["results"])
+        merged_data["aggregate_metrics"] = aggregate_metrics
+
+        # Print report
+        logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode\n{'='*60}")
+        print_evaluation_report(aggregate_metrics)
+
+        # Prepare results data
+        all_results[mode] = merged_data
+
+        # Save results immediately after each mode completes
+        ensure_output_directory(output_path)
         with open(output_path, 'w') as f:
-            json.dump(mode_results, f, indent=2)
+            json.dump(merged_data, f, indent=2)
         logger.info(f"\n✓ {mode.upper() if args.retrieval_mode == 'all' else ''} Results saved to {output_path}")
 
         # Cleanup

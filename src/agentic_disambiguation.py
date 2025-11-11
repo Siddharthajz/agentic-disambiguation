@@ -42,7 +42,11 @@ from core import (
     RetrievalResult,
     get_model_name_from_config,
     get_organized_output_path,
-    ensure_output_directory
+    ensure_output_directory,
+    load_existing_results,
+    get_processed_question_ids,
+    filter_unprocessed_data,
+    merge_results
 )
 from evaluation import RAGEvaluator, print_evaluation_report
 
@@ -657,7 +661,22 @@ Please provide a comprehensive answer that addresses all interpretations."""
         question_id = item.get('id', str(hash(question)))
 
         async with semaphore:
-            return await self.run_single(question, question_id, item)
+            try:
+                return await self.run_single(question, question_id, item)
+            except Exception as e:
+                logger.error(f"Error processing question '{question}': {e}")
+                return RAGResult(
+                    question_id=question_id,
+                    question=question,
+                    retrieved_docs=[],
+                    generated_answer=f"ERROR: {str(e)}",
+                    reference_data=item,
+                    retrieval_time=0.0,
+                    generation_time=0.0,
+                    total_tokens=0,
+                    evaluation={},
+                    metadata={"error": str(e)}
+                )
 
     async def run_batch(
         self,
@@ -771,24 +790,64 @@ def main():
         framework = LangGraphAgenticDisambiguation(config)
         framework._load_retriever(mode)
 
-        # Run experiments
-        results = asyncio.run(framework.run_batch(test_data, limit=args.limit))
+        # Determine output path for resume capability
+        if args.output_path is None:
+            model_name = get_model_name_from_config(config.to_dict())
+            is_test = args.limit is not None and args.limit < 100
+            output_path = get_organized_output_path(
+                approach="agentic",
+                retrieval_mode=mode,
+                model_name=model_name,
+                is_test=is_test
+            )
+        else:
+            output_path = Path(args.output_path)
+            if args.retrieval_mode == "all":
+                output_path = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
+        
+        # Check for existing results and filter test data
+        existing_results = load_existing_results(output_path)
+        if existing_results:
+            processed_ids = get_processed_question_ids(existing_results)
+            original_count = len(test_data)
+            test_data = filter_unprocessed_data(test_data, processed_ids)
+            if len(test_data) < original_count:
+                logger.info(f"Resuming: {len(processed_ids)} already processed, {len(test_data)} remaining")
+            else:
+                logger.info(f"Existing results found but no overlap, starting fresh")
+        else:
+            logger.info(f"Starting new experiment")
 
-        # Compute metrics
+        # Run experiments (only on unprocessed data)
+        if test_data:
+            results = asyncio.run(framework.run_batch(test_data, limit=args.limit))
+            new_results = [r.to_dict() for r in results]
+        else:
+            logger.info(f"All items already processed, skipping run")
+            new_results = []
+
+        # Merge with existing results
+        config_dict = config.to_dict()
+        merged_data = merge_results(existing_results, new_results, config_dict)
+        merged_data["implementation"] = "LangGraph"
+
+        # Recompute aggregate metrics on merged results
         logger.info(f"\nComputing aggregate metrics for {mode}...")
-        aggregate_metrics = framework.evaluator.evaluate_batch([r.to_dict() for r in results])
+        aggregate_metrics = framework.evaluator.evaluate_batch(merged_data["results"])
+        merged_data["aggregate_metrics"] = aggregate_metrics
 
         # Print report
         logger.info(f"\n{'='*60}\n  Results for {mode.upper()} mode (LangGraph)\n{'='*60}")
         print_evaluation_report(aggregate_metrics)
 
         # Save results
-        all_results[mode] = {
-            "config": config.to_dict(),
-            "aggregate_metrics": aggregate_metrics,
-            "results": [r.to_dict() for r in results],
-            "implementation": "LangGraph"
-        }
+        all_results[mode] = merged_data
+
+        # Save results immediately
+        ensure_output_directory(output_path)
+        with open(output_path, 'w') as f:
+            json.dump(merged_data, f, indent=2)
+        logger.info(f"\n{mode.upper()} results saved to {output_path}")
 
         # Cleanup
         if args.retrieval_mode == "all":
@@ -799,30 +858,30 @@ def main():
             cache_stats = framework.cache.get_stats()
             logger.info(f"\nCache stats: {cache_stats}")
 
-    # Save results
+    # Results already saved during loop, just log summary
     if args.retrieval_mode == "all":
-        for mode, data in all_results.items():
-            # Use organized path if custom output path not specified
-            if args.output_path is None:
-                model_name = get_model_name_from_config(data["config"])
-                is_test = args.limit is not None and args.limit < 100
+        logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
+        if args.output_path is None:
+            data = all_results[modes_to_run[0]]
+            model_name = get_model_name_from_config(data["config"])
+            is_test = args.limit is not None and args.limit < 100
+            base_output = get_organized_output_path(
+                approach="agentic",
+                retrieval_mode=modes_to_run[0],
+                model_name=model_name,
+                is_test=is_test
+            )
+            logger.info(f"\nAll results saved in: {base_output.parent}")
+            for mode in modes_to_run:
                 mode_output = get_organized_output_path(
                     approach="agentic",
                     retrieval_mode=mode,
                     model_name=model_name,
                     is_test=is_test
                 )
-                ensure_output_directory(mode_output)
-            else:
-                output_path = Path(args.output_path)
-                mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(mode_output, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.info(f"\n{mode.upper()} results saved to {mode_output}")
+                logger.info(f"  - {mode_output.name}")
     else:
-        # Use organized path if custom output path not specified
+        # Results already saved, just log
         if args.output_path is None:
             data = all_results[args.retrieval_mode]
             model_name = get_model_name_from_config(data["config"])
@@ -833,13 +892,9 @@ def main():
                 model_name=model_name,
                 is_test=is_test
             )
-            ensure_output_directory(output_path)
         else:
             output_path = Path(args.output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_path, 'w') as f:
-            json.dump(all_results[args.retrieval_mode], f, indent=2)
+        
         logger.info(f"\nResults saved to {output_path}")
 
 if __name__ == "__main__":

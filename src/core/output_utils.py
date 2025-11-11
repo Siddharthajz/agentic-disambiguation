@@ -1,5 +1,9 @@
+import json
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List, Set
+
+logger = logging.getLogger(__name__)
 
 
 def get_model_name_from_config(config_dict: dict) -> str:
@@ -74,3 +78,116 @@ def ensure_output_directory(output_path: Path) -> None:
         output_path: Path to output file
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_existing_results(output_path: Path) -> Optional[Dict[str, Any]]:
+    """
+    Load existing results from a file if it exists.
+
+    Args:
+        output_path: Path to results file
+
+    Returns:
+        Existing results dictionary or None if file doesn't exist
+    """
+    if output_path.exists():
+        try:
+            with open(output_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load existing results from {output_path}: {e}")
+            return None
+    return None
+
+
+def get_processed_question_ids(existing_results: Dict[str, Any]) -> Set[str]:
+    """
+    Extract question IDs from existing results.
+
+    Args:
+        existing_results: Results dictionary with 'results' key containing list of RAGResult dicts
+
+    Returns:
+        Set of processed question IDs
+    """
+    if not existing_results or "results" not in existing_results:
+        return set()
+    
+    processed_ids = set()
+    for result in existing_results.get("results", []):
+        if "question_id" in result:
+            processed_ids.add(result["question_id"])
+    
+    return processed_ids
+
+
+def filter_unprocessed_data(
+    test_data: List[Dict[str, Any]],
+    processed_ids: Set[str]
+) -> List[Dict[str, Any]]:
+    """
+    Filter test data to only include unprocessed items.
+
+    Args:
+        test_data: List of test examples
+        processed_ids: Set of already-processed question IDs
+
+    Returns:
+        Filtered list of unprocessed test examples
+    """
+    if not processed_ids:
+        return test_data
+    
+    unprocessed = []
+    for item in test_data:
+        # Generate question_id the same way as in _process_with_semaphore
+        question = item.get('question', '')
+        question_id = item.get('id', str(hash(question)))
+        
+        if question_id not in processed_ids:
+            unprocessed.append(item)
+    
+    return unprocessed
+
+
+def merge_results(
+    existing_results: Dict[str, Any],
+    new_results: List[Dict[str, Any]],
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Merge new results with existing results.
+
+    Args:
+        existing_results: Existing results dictionary
+        new_results: List of new RAGResult dictionaries
+        config: Configuration dictionary to use (from new run)
+
+    Returns:
+        Merged results dictionary
+    """
+    if not existing_results:
+        return {
+            "config": config,
+            "aggregate_metrics": {},  # Will be recomputed
+            "results": new_results
+        }
+    
+    # Merge results lists
+    existing_results_list = existing_results.get("results", [])
+    existing_ids = {r.get("question_id") for r in existing_results_list}
+    
+    # Add new results, replacing any duplicates (new results take precedence)
+    merged_results = existing_results_list.copy()
+    for new_result in new_results:
+        new_id = new_result.get("question_id")
+        if new_id in existing_ids:
+            # Replace existing result with new one
+            merged_results = [r for r in merged_results if r.get("question_id") != new_id]
+        merged_results.append(new_result)
+    
+    return {
+        "config": config,  # Use new config
+        "aggregate_metrics": {},  # Will be recomputed
+        "results": merged_results
+    }

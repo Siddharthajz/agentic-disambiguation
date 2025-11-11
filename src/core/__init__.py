@@ -22,7 +22,11 @@ from .config import RAGConfig
 from .output_utils import (
     get_model_name_from_config,
     get_organized_output_path,
-    ensure_output_directory
+    ensure_output_directory,
+    load_existing_results,
+    get_processed_question_ids,
+    filter_unprocessed_data,
+    merge_results
 )
 
 __all__ = [
@@ -43,4 +47,8 @@ __all__ = [
     "get_model_name_from_config",
     "get_organized_output_path",
     "ensure_output_directory",
+    "load_existing_results",
+    "get_processed_question_ids",
+    "filter_unprocessed_data",
+    "merge_results",
 ]
