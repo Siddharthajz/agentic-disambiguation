@@ -1,195 +1,288 @@
-# Agentic Disambiguation
+# Agentic Disambiguation for Ambiguous Question Answering
 
-A research project for evaluating Retrieval-Augmented Generation (RAG) systems on the AmbigNQ dataset—a benchmark for answering ambiguous open-domain questions.
+A research project investigating agentic RAG (Retrieval-Augmented Generation) approaches for handling ambiguous open-domain questions. This work evaluates how LLM-powered agents can detect and resolve question ambiguity through sub-query decomposition, hypothetical document generation, and structured multi-interpretation synthesis.
 
-## Overview
+## Research Motivation
 
-This project implements and compares three RAG approaches for handling ambiguous questions:
+Open-domain question answering systems frequently encounter **ambiguous questions**—queries with multiple valid interpretations that require different answers. For example:
 
-1. **Vanilla RAG**: Standard single-round retrieval and generation
-2. **Iterative RAG**: Multi-round refinement with quality checking
-3. **Agentic RAG**: LangGraph-based agent that detects ambiguity, generates sub-queries, and uses HyDE (Hypothetical Document Embeddings) for enhanced retrieval
+> *"When did the US break away from England?"*
 
-All approaches use shared modular components for retrieval (sparse/dense/hybrid) and generation, with comprehensive evaluation metrics including F1, D-F1 (Disambiguation F1), nDCG, and Recall.
+This question has multiple valid interpretations:
+- **Declaration of Independence**: July 4, 1776
+- **Treaty of Paris (formal recognition)**: September 3, 1783
+- **End of Revolutionary War**: 1781 (Yorktown)
 
-## Table of Contents
+Standard RAG systems typically return a single answer, missing the inherent ambiguity. This project explores **agentic approaches** that explicitly detect ambiguity and provide comprehensive coverage of all plausible interpretations.
 
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Environment Setup](#environment-setup)
-- [Dataset Preparation](#dataset-preparation)
-- [Building FAISS Index](#building-faiss-index)
-- [Local LLM Setup (Optional)](#local-llm-setup-optional)
-- [Quick Start](#quick-start)
-- [Usage Examples](#usage-examples)
-- [Project Structure](#project-structure)
+## Key Contributions
 
-## Prerequisites
+1. **Coherence-Based Ambiguity Detection**: Using document embedding clustering and silhouette scores to distinguish between:
+   - **Aleatoric uncertainty** (genuine ambiguity with distinct interpretations)
+   - **Epistemic uncertainty** (lack of knowledge/evidence)
 
-### Required Software
+2. **Cluster-Guided Sub-Query Generation**: Generating interpretation-specific sub-queries from document clusters rather than purely LLM-based decomposition
 
-1. **Python 3.9+**
-   - Check version: `python --version` or `python3 --version`
-   - Download from [python.org](https://www.python.org/downloads/)
+3. **HyDE-Enhanced Retrieval**: Hypothetical Document Embeddings for improved semantic retrieval per interpretation
 
-2. **Java 21+** (Required for PySerini/BM25 retrieval)
+4. **Structured Multi-Intent Synthesis**: JSON-structured outputs with explicit intent labeling and confidence scoring
 
-   **macOS:**
-   ```bash
-   brew install openjdk@21
-   ```
+## Dataset: AmbigNQ
 
-   **Ubuntu/Debian:**
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y openjdk-21-jdk
-   ```
+This project uses [AmbigNQ](https://nlp.cs.washington.edu/ambigqa/) (Ambiguous Natural Questions), a benchmark derived from Google's Natural Questions dataset where annotators identified questions with multiple valid interpretations.
 
-   **Verify installation:**
-   ```bash
-   java -version
-   # Should show: openjdk version "21.x.x" or higher
-   ```
+### Dataset Structure
 
-3. **Git** (for cloning the repository)
-   ```bash
-   git --version
-   ```
-
-### System Requirements
-
-- **Disk Space**: ~15GB free
-  - Dataset and indices: ~9GB (Wikipedia BM25 indices)
-  - FAISS index: ~1-2GB (if using dense retrieval)
-  - Models: ~2.5GB (if using local LLM)
-  - Python environment: ~1GB
-
-- **RAM**: Minimum 8GB, recommended 16GB+
-  - Dense retrieval loads large FAISS indices (~2-10GB depending on corpus size)
-  - Sparse retrieval is lighter (~500MB)
-
-- **Internet**: Required for first-time setup
-  - Downloading dataset and indices
-  - API calls (unless using local LLM)
-
-## Installation
-
-### Step 1: Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/agentic-disambiguation.git
-cd agentic-disambiguation
+```json
+{
+  "question": "When was the nba 3 point line introduced?",
+  "annotations": [
+    {
+      "type": "multipleQAs",
+      "qaPairs": [
+        {"question": "When was the NBA 3-point line introduced?", "answer": ["1979"]},
+        {"question": "When was the ABA 3-point line introduced?", "answer": ["1967"]}
+      ]
+    }
+  ],
+  "nq_answer": ["1979"],
+  "viewed_doc_titles": ["Three-point field goal"]
+}
 ```
 
-### Step 2: Create Virtual Environment
-
-**macOS/Linux:**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-**Windows:**
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-```
-
-You should see `(.venv)` at the beginning of your terminal prompt.
-
-### Step 3: Install Python Dependencies
-
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-**Note:** If you encounter issues with PySerini installation, ensure Java 21+ is installed and `JAVA_HOME` is set:
-
-```bash
-# macOS/Linux
-export JAVA_HOME=$(/usr/libexec/java_home -v 21)  # macOS
-export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64  # Linux
-
-# Windows (in PowerShell)
-$env:JAVA_HOME="C:\Program Files\Java\jdk-21"
-```
-
-## Environment Setup
-
-### OpenAI API Key (for cloud-based generation)
-
-1. Create a `.env` file in the project root:
-   ```bash
-   touch .env
-   ```
-
-2. Add your OpenAI API key:
-   ```
-   OPENAI_API_KEY=sk-your-key-here
-   ```
-
-3. Get an API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-
-**Note:** You can skip this if you plan to use only local LLMs (see [Local LLM Setup](#local-llm-setup-optional)).
-
-### Verify Installation
-
-```bash
-# Activate virtual environment (if not already active)
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate  # Windows
-
-# Test Python imports
-python -c "import pyserini; import faiss; import openai; print('All imports successful!')"
-```
-
-## Dataset Preparation
-
-### Step 1: Download AmbigNQ Dataset
-
-The first run will automatically download the Wikipedia BM25 indices (~9GB, one-time download):
+### Obtaining the Data
 
 ```bash
 python data/ambigqa_import.py --data-dir ./data --sample-n 300
 ```
 
-**What this does:**
-- Downloads AmbigNQ train/dev splits from HuggingFace
-- Samples 300 examples for the test set
-- Downloads PySerini Wikipedia indices (first run only)
-- Creates `data/ambignq_train.json`, `data/ambignq_dev.json`, `data/ambignq_test.json`
+This downloads the AmbigNQ dataset from the University of Washington NLP group and creates:
+- `ambignq_train.json`: Training split
+- `ambignq_dev.json`: Development split
+- `ambignq_test.json`: Sampled test set (300 examples by default)
 
-**Options:**
-- `--sample-n N`: Number of test examples (default: 300, full test set: ~2000)
-- `--data-dir PATH`: Directory to save data (default: ./data)
+## Agentic Pipeline Architecture
 
-### Step 2: Verify Dataset
+The core contribution is a **LangGraph-based agentic pipeline** that orchestrates multiple specialized nodes for ambiguity handling:
 
-```bash
-# Check created files
-ls -lh data/
-
-# Should show:
-# ambignq_train.json
-# ambignq_dev.json
-# ambignq_test.json
+```
+                    ┌─────────────────────┐
+                    │   Input Question    │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │ Ambiguity Detection │
+                    │  (Coherence Check)  │
+                    └──────────┬──────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+     ┌────────▼────────┐       │       ┌────────▼────────┐
+     │   Unambiguous   │       │       │    Ambiguous/   │
+     │                 │       │       │    Uncertain    │
+     └────────┬────────┘       │       └────────┬────────┘
+              │                │                │
+              │         ┌──────▼──────┐         │
+              │         │   Simple    │         │
+              │         │  Retrieval  │         │
+              │         └──────┬──────┘         │
+              │                │     ┌──────────▼──────────┐
+              │                │     │ Sub-Query Generation│
+              │                │     │  (Cluster-Guided)   │
+              │                │     └──────────┬──────────┘
+              │                │                │
+              │                │     ┌──────────▼──────────┐
+              │                │     │   HyDE Generation   │
+              │                │     │  (Per Sub-Query)    │
+              │                │     └──────────┬──────────┘
+              │                │                │
+              │                │     ┌──────────▼──────────┐
+              │                │     │ Enhanced Retrieval  │
+              │                │     │ (Sub-Queries+HyDE)  │
+              │                │     └──────────┬──────────┘
+              │                │                │
+              └────────────────┼────────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  Answer Synthesis   │
+                    │ (Structured Output) │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   Multi-Intent      │
+                    │   JSON Response     │
+                    └─────────────────────┘
 ```
 
-## Building FAISS Index
+### Node 1: Ambiguity Detection with Coherence Check
 
-**Required only for dense or hybrid retrieval modes.**
+Rather than relying solely on LLM prompting to detect ambiguity, this node uses **embedding-based coherence analysis**:
 
-### Step 1: Prepare Embeddings File
+```python
+# Cluster retrieved documents
+kmeans = KMeans(n_clusters=2).fit(doc_embeddings)
 
-Ensure you have the pre-computed embeddings file:
-```bash
-ls data/wiki_minilm.ndjson
+# Calculate metrics
+centroid = np.mean(embeddings, axis=0)
+variance = euclidean_distances(embeddings, [centroid]).mean()
+separability = silhouette_score(embeddings, kmeans.labels_)
+
+# Classification logic
+if variance > THRESHOLD and separability > THRESHOLD:
+    status = "Ambiguous"  # Distinct clusters = multiple interpretations
+elif variance > THRESHOLD:
+    status = "Uncertain"  # High variance, no structure = epistemic failure
+else:
+    status = "Unambiguous"
 ```
 
-This file should contain Wikipedia passages with pre-computed embeddings from the `all-MiniLM-L6-v2` model.
+**Key insight**: High document variance with high cluster separability indicates genuine ambiguity (aleatoric), while high variance with low separability indicates insufficient/conflicting evidence (epistemic).
 
-### Step 2: Build the Index
+### Node 2: Cluster-Guided Sub-Query Generation
+
+For ambiguous questions, sub-queries are generated from document clusters rather than pure LLM imagination:
+
+1. **Cluster documents** using K-Means on embeddings
+2. **Relevance pruning**: Filter clusters with low cosine similarity to the original query
+3. **Generate sub-queries**: For each valid cluster, prompt the LLM to formulate a specific question representing that interpretation
+
+This grounds sub-query generation in actual retrieved evidence.
+
+### Node 3: HyDE (Hypothetical Document Embeddings)
+
+For each sub-query, generate a hypothetical Wikipedia passage that would answer it:
+
+```
+Question: When was the NBA 3-point line introduced?
+
+Hypothetical Document:
+"The NBA adopted the three-point line for the 1979-80 season,
+borrowing the concept from the ABA which had used it since 1967..."
+```
+
+These hypothetical documents are then used as additional retrieval queries, improving semantic matching for specific interpretations.
+
+### Node 4: Enhanced Retrieval
+
+Retrieval is performed for both:
+- Original sub-queries
+- Generated HyDE documents
+
+Results are **deduplicated** by document ID and **re-ranked** by score, ensuring diverse coverage without redundancy.
+
+### Node 5: Structured Answer Synthesis
+
+The final answer uses structured JSON output:
+
+```json
+{
+  "intents": [
+    {
+      "intent_label": "NBA Introduction",
+      "confidence": 0.9,
+      "key_facts": ["1979-80 season", "borrowed from ABA"]
+    },
+    {
+      "intent_label": "ABA Introduction",
+      "confidence": 0.8,
+      "key_facts": ["1967", "original three-point line"]
+    }
+  ],
+  "synthesis": "The three-point line was introduced in the NBA for the 1979-80 season, though it originated in the ABA in 1967...",
+  "concise_answer": "1979 (NBA) / 1967 (ABA)"
+}
+```
+
+## Retrieval Components
+
+### Sparse Retrieval (BM25)
+- **Implementation**: PySerini wrapping Apache Lucene
+- **Index**: `wikipedia-dpr` (Wikipedia passages from DPR project)
+- **Characteristics**: Fast, keyword-based, ~50ms per query
+
+### Dense Retrieval (FAISS)
+- **Implementation**: FAISS with sentence-transformers
+- **Encoder**: `all-MiniLM-L6-v2` (384-dimensional embeddings)
+- **Index**: Custom-built from Simple Wikipedia embeddings
+- **Characteristics**: Semantic matching, ~100ms per query after warmup
+
+> **Note on corpus selection**: The full Wikipedia DPR corpus (~21M passages) requires approximately **80GB of active RAM** to load the FAISS index, making it infeasible for resource-constrained environments. This project uses **Simple Wikipedia** as a substitute for dense retrieval, which provides adequate coverage for evaluation while remaining tractable (~2-4GB RAM). The sparse retrieval (BM25) still uses the full Wikipedia index via PySerini's memory-mapped streaming approach.
+
+### Hybrid Retrieval (RRF)
+- **Algorithm**: Reciprocal Rank Fusion
+- **Formula**: `score = 1/(60 + rank_sparse) + 1/(60 + rank_dense)`
+- **Rationale**: Combines keyword precision with semantic recall
+
+## Evaluation Metrics
+
+### Disambiguation F1 (D-F1) — Primary Metric
+
+D-F1 measures coverage of all plausible interpretations:
+
+```
+D-F1 = interpretations_covered / total_interpretations
+```
+
+An interpretation is "covered" if the generated answer achieves F1 ≥ 0.5 with any valid answer for that interpretation.
+
+**Example**:
+- Question has 3 annotated interpretations
+- System answer covers 2 of them
+- D-F1 = 2/3 = 0.667
+
+### Answer Quality (F1)
+
+Token-level F1 score after normalization (lowercase, remove articles/punctuation). Maximum F1 across all valid reference answers.
+
+### Retrieval Quality
+
+- **nDCG@k**: Normalized Discounted Cumulative Gain
+- **Recall@k**: Fraction of relevant documents retrieved
+
+## Experimental Results
+
+Comparison on 300 AmbigNQ test examples (hybrid retrieval, GPT-4o-mini):
+
+| Approach | Mean F1 | Mean D-F1 | Coverage Rate | Tokens |
+|----------|---------|-----------|---------------|--------|
+| Vanilla RAG | 0.545 | 0.375 | 28.1% | 247K |
+| **Agentic** | **0.592** | **0.394** | **29.3%** | 290K |
+
+**Key findings**:
+- Agentic approach improves F1 by ~8.6% and D-F1 by ~5.1%
+- Trade-off: Higher token usage due to sub-query generation and HyDE
+- Epistemic uncertainty detection helps identify questions where retrieval fails
+
+## Installation
+
+### Prerequisites
+
+- Python 3.9+
+- Java 21+ (required for PySerini/BM25)
+- ~15GB disk space
+
+### Setup
+
+```bash
+# Clone repository
+git clone https://github.com/aravadikesh/agentic-disambiguation.git
+cd agentic-disambiguation
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up API key
+echo "OPENAI_API_KEY=sk-your-key-here" > .env
+
+# Download dataset (first run downloads ~9GB Wikipedia indices)
+python data/ambigqa_import.py --data-dir ./data --sample-n 300
+```
+
+### Building FAISS Index (for dense/hybrid retrieval)
 
 ```bash
 python scripts/build_faiss_index.py \
@@ -198,243 +291,114 @@ python scripts/build_faiss_index.py \
   --verify
 ```
 
-**What this does:**
-- Reads pre-computed embeddings from NDJSON file
-- Builds FAISS index with cosine similarity (IndexFlatIP with L2-normalized vectors)
-- Creates `data/ambigqa_wiki.index` (FAISS index)
-- Creates `data/ambigqa_wiki_metadata.json` (document metadata)
-- Runs test query if `--verify` flag is used
+## Usage
 
-**Options:**
-- `--input-file PATH`: Path to NDJSON embeddings file (required)
-- `--output-dir PATH`: Directory to save index (default: ./data)
-- `--verify`: Run test query after building
-
-**Expected output:**
-```
-Loading embeddings from data/wiki_minilm.ndjson...
-Loaded 1000000 documents
-Building FAISS index...
-Index built successfully
-Saving to data/ambigqa_wiki.index...
-Done! Index saved.
-```
-
-### Verify Index
+### Running the Agentic Pipeline
 
 ```bash
-python -c "
-import faiss
-index = faiss.read_index('data/ambigqa_wiki.index')
-print(f'Index contains {index.ntotal} vectors')
-print(f'Dimension: {index.d}')
-"
-```
-
-## Local LLM Setup (Optional)
-
-Run without OpenAI API using llama.cpp with Qwen models.
-
-### Step 1: Install llama-cpp-python
-
-```bash
-pip install llama-cpp-python
-```
-
-**For M1/M2 Mac (Metal acceleration):**
-```bash
-CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
-```
-
-### Step 2: Download Model
-
-```bash
-# List available models
-python scripts/download_local_model.py --list
-
-# Download default model (Qwen3-4B-Q4, ~2.5GB)
-python scripts/download_local_model.py
-
-# Or download higher quality model
-python scripts/download_local_model.py --model qwen3-4b-q6
-```
-
-**Available models:**
-- `qwen2.5-3b-q4`: Qwen2.5-3B-Instruct (Q4_K_M, ~2GB)
-- `qwen2.5-3b-q6`: Qwen2.5-3B-Instruct (Q6_K, ~2GB, higher quality)
-- `qwen3-4b-q4`: Qwen3-4B-Instruct-2507 (Q4_K_M, ~2.5GB) **[DEFAULT]**
-- `qwen3-4b-q6`: Qwen3-4B-Instruct-2507 (Q6_K, ~3.3GB, higher quality)
-- `qwen3-4b-q8`: Qwen3-4B-Instruct-2507 (Q8_0, ~4.3GB, highest quality)
-
-Models are saved to `models/` directory.
-
-### Step 3: Verify Local LLM
-
-```bash
-python scripts/download_local_model.py --test
-```
-
-## Quick Start
-
-### Test the Setup
-
-**IMPORTANT: Always activate the virtual environment first:**
-```bash
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate  # Windows
-```
-
-Run a quick test with 5 examples:
-
-```bash
-python src/vanilla_RAG.py --retrieval-mode sparse --limit 5
-```
-
-**Expected output:**
-```
-Loading dataset from data/ambignq_test.json...
-Loaded 5 examples
-Initializing retriever...
-Running Vanilla RAG on 5 examples...
-100%|████████████████████| 5/5 [00:15<00:00,  3.05s/it]
-
-Evaluation Report
-=================
-Examples: 5
-Mean F1: 0.523
-Mean D-F1: 0.400
-...
-```
-
-### Single Query Test
-
-```bash
+# Quick test (5 examples)
 python src/agentic_disambiguation.py \
-  --single-query "When was the NBA 3-point line introduced?" \
   --retrieval-mode sparse \
+  --limit 5 \
   --verbose
-```
 
-This runs the full agentic pipeline on one question with detailed logging.
-
-## Usage Examples
-
-### Example 1: Vanilla RAG (All Retrieval Modes)
-
-```bash
-python src/vanilla_RAG.py \
-  --retrieval-mode all \
-  --data-path data/ambignq_test.json \
-  --limit 300
-```
-
-Results automatically saved to organized structure:
-- `results/vanilla/sparse/gpt-4o-mini/results.json`
-- `results/vanilla/dense/gpt-4o-mini/results.json`
-- `results/vanilla/hybrid/gpt-4o-mini/results.json`
-
-### Example 2: Iterative RAG with Hybrid Retrieval
-
-```bash
-python src/iterative_RAG.py \
-  --retrieval-mode hybrid \
-  --max-iterations 3 \
-  --limit 50
-```
-
-Results saved to: `results/iterative/hybrid/gpt-4o-mini/results_test.json`
-
-### Example 3: Agentic RAG (Recommended)
-
-```bash
+# Full experiment
 python src/agentic_disambiguation.py \
   --retrieval-mode hybrid \
-  --limit 50 \
+  --limit 300
+
+# Single query (debugging)
+python src/agentic_disambiguation.py \
+  --single-query "When did the US break away from England?" \
+  --retrieval-mode hybrid \
   --verbose
 ```
 
-Results saved to: `results/agentic/hybrid/gpt-4o-mini/results_test.json`
-
-### Example 4: Using Local LLM (No API Key Required)
+### Local LLM (No API Required)
 
 ```bash
+# Download model (~2.5GB)
+python scripts/download_local_model.py --model qwen3-4b-q4
+
+# Run with local inference
 python src/agentic_disambiguation.py \
   --use-local-llm \
   --retrieval-mode sparse \
-  --limit 10 \
-  --verbose
+  --limit 10
 ```
 
-Results saved to: `results/agentic/sparse/qwen3-4b-q4/results_test.json`
+### Key Arguments
 
-### Example 5: Custom Configuration
-
-```bash
-python src/vanilla_RAG.py \
-  --retrieval-mode dense \
-  --dense-index data/ambigqa_wiki.index \
-  --dense-encoder all-MiniLM-L6-v2 \
-  --dense-metadata data/ambigqa_wiki_metadata.json \
-  --top-k 10 \
-  --model gpt-4o-mini \
-  --max-tokens 300 \
-  --limit 100
-```
-
-### Compare Multiple Approaches
-
-```bash
-python src/compare_results.py \
-  --vanilla results/vanilla/sparse/gpt-4o-mini/results.json \
-  --iterative results/iterative/sparse/gpt-4o-mini/results.json \
-  --agentic results/agentic/hybrid/gpt-4o-mini/results.json \
-  --output results/comparison.json \
-  --baseline vanilla
-```
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--retrieval-mode` | `sparse`, `dense`, `hybrid`, or `all` | `hybrid` |
+| `--limit` | Number of examples to process | None (all) |
+| `--verbose` | Detailed logging per step | False |
+| `--single-query` | Run on single question | None |
+| `--use-local-llm` | Use llama.cpp instead of API | False |
+| `--top-k` | Documents to retrieve | 5 |
+| `--model` | OpenAI model | `gpt-4o-mini` |
 
 ## Project Structure
 
 ```
 agentic-disambiguation/
 ├── src/
-│   ├── core/                      # Shared modular components
-│   │   ├── data_models.py        # RetrievalResult, RAGResult dataclasses
-│   │   ├── config.py             # RAGConfig for unified configuration
-│   │   ├── cache.py              # RetrievalCache for caching
-│   │   ├── retrievers.py         # BaseRetriever + implementations
-│   │   ├── generators.py         # BaseGenerator + implementations
-│   │   └── output_utils.py       # Organized output path utilities
-│   │
-│   ├── vanilla_RAG.py            # Baseline: Standard RAG
-│   ├── iterative_RAG.py          # Baseline: Multi-round refinement
-│   ├── agentic_disambiguation.py # Novel: Agentic approach with LangGraph
-│   ├── evaluation.py             # Evaluation metrics (F1, D-F1, nDCG, Recall)
-│   └── compare_results.py        # Compare multiple approaches
-│
+│   ├── agentic_disambiguation.py   # Main agentic pipeline (LangGraph)
+│   ├── evaluation.py               # F1, D-F1, nDCG, Recall metrics
+│   ├── compare_results.py          # Cross-approach comparison
+│   ├── vanilla_RAG.py              # Baseline: standard RAG
+│   ├── iterative_RAG.py            # Baseline: multi-round RAG
+│   └── core/
+│       ├── retrievers.py           # Sparse/Dense/Hybrid retrievers
+│       ├── generators.py           # OpenAI, HyDE, LlamaCpp generators
+│       ├── data_models.py          # RetrievalResult, RAGResult
+│       ├── config.py               # RAGConfig dataclass
+│       └── cache.py                # Retrieval caching
 ├── data/
-│   ├── ambigqa_import.py         # Download/prepare dataset
-│   ├── ambignq_train.json        # Training split
-│   ├── ambignq_dev.json          # Dev split
-│   ├── ambignq_test.json         # Test split (300 examples)
-│   └── wiki_minilm.ndjson        # Pre-computed Wikipedia embeddings
-│
+│   ├── ambigqa_import.py           # Dataset download script
+│   └── ambignq_*.json              # Dataset files
 ├── scripts/
-│   ├── build_faiss_index.py      # Build FAISS index from embeddings
-│   ├── download_local_model.py   # Download local LLM models
-│   ├── reorganize_results.py     # Reorganize legacy results
-│   └── visualize_langgraph.py    # Visualize LangGraph workflow
-│
-├── results/                       # Organized experiment results
-│   ├── vanilla/                   # by approach
-│   │   ├── sparse/               # by retrieval mode
-│   │   │   └── gpt-4o-mini/      # by model
-│   │   ├── dense/
-│   │   └── hybrid/
-│   ├── iterative/
-│   └── agentic/
-├── models/                        # Local LLM models (if using)
-├── .cache/                        # Retrieval cache directory
-├── requirements.txt               # Python dependencies
-├── .env                          # API keys (create this)
-└── README.md                     # This file
+│   ├── build_faiss_index.py        # FAISS index builder
+│   └── download_local_model.py     # Local LLM downloader
+├── results/                        # Experiment outputs
+│   └── {approach}/{mode}/{model}/
+└── requirements.txt
 ```
+
+## Output Format
+
+Results are saved as JSON with this structure:
+
+```json
+{
+  "config": { "retrieval_mode": "hybrid", "model": "gpt-4o-mini", ... },
+  "aggregate_metrics": {
+    "num_examples": 300,
+    "mean_f1": 0.592,
+    "mean_d_f1": 0.394,
+    "coverage_rate": 0.293,
+    "epistemic_uncertainty_rate": 0.12
+  },
+  "results": [
+    {
+      "question": "...",
+      "generated_answer": "...",
+      "evaluation": { "f1_score": 0.67, "d_f1": 0.5, ... },
+      "metadata": {
+        "ambiguity_status": "Ambiguous",
+        "subqueries": ["...", "..."],
+        "hyde_documents": { "subquery1": "..." },
+        "intents": [{ "intent_label": "...", "confidence": 0.9 }]
+      }
+    }
+  ]
+}
+```
+
+## References
+
+- **AmbigNQ Dataset**: Min et al., [AmbigQA: Answering Ambiguous Open-domain Questions](https://arxiv.org/abs/2004.10645), EMNLP 2020
+- **HyDE**: Gao et al., [Precise Zero-Shot Dense Retrieval without Relevance Labels](https://arxiv.org/abs/2212.10496), ACL 2023
+- **Reciprocal Rank Fusion**: Cormack et al., [Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods](https://dl.acm.org/doi/10.1145/1571941.1572114), SIGIR 2009
+- **LangGraph**: [LangGraph Documentation](https://python.langchain.com/docs/langgraph)
