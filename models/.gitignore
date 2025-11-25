@@ -5,5 +5,7 @@
 *.pt
 *.pth
 
+roberta-squad2/
+
 # But track this .gitignore
 !.gitignore

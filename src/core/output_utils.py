@@ -1,9 +1,26 @@
+import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set
 
 logger = logging.getLogger(__name__)
+
+
+def _deterministic_hash(text: str) -> str:
+    """
+    Generate a deterministic hash for a string.
+
+    Uses MD5 for consistent hashing across Python sessions.
+    Python's built-in hash() uses randomization and is NOT deterministic.
+
+    Args:
+        text: String to hash
+
+    Returns:
+        Hexadecimal hash string
+    """
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 
 def get_model_name_from_config(config_dict: dict) -> str:
@@ -137,16 +154,15 @@ def filter_unprocessed_data(
     """
     if not processed_ids:
         return test_data
-    
+
     unprocessed = []
     for item in test_data:
-        # Generate question_id the same way as in _process_with_semaphore
         question = item.get('question', '')
-        question_id = item.get('id', str(hash(question)))
-        
+        question_id = item.get('id', _deterministic_hash(question))
+
         if question_id not in processed_ids:
             unprocessed.append(item)
-    
+
     return unprocessed
 
 

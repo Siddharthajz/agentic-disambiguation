@@ -11,11 +11,16 @@ Multi-agent RAG pipeline for handling ambiguous questions using LangGraph:
 This module uses LangGraph for agent orchestration and shared core components.
 """
 
+# Fix for Java/OpenMP conflict on Apple Silicon
+# Must be set BEFORE importing transformers/torch
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import argparse
 import asyncio
 import json
 import logging
-import os
 import time
 import re
 from pathlib import Path
@@ -54,7 +59,10 @@ from core import (
     load_existing_results,
     get_processed_question_ids,
     filter_unprocessed_data,
-    merge_results
+    merge_results,
+    detect_dataset_from_item,
+    get_question_field,
+    PromptRegistry,
 )
 from evaluation import RAGEvaluator, print_evaluation_report, compute_disambiguation_f1
 
@@ -145,9 +153,10 @@ class LangGraphAgenticDisambiguation:
     5. Answer Synthesis: Generate comprehensive answer using Structured Output
     """
 
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: RAGConfig, dataset: str = "ambignq"):
         """Initialize LangGraph framework."""
         self.config = config
+        self.dataset = dataset
 
         # Setup cache
         self.cache = RetrievalCache(
@@ -215,7 +224,8 @@ class LangGraphAgenticDisambiguation:
                 model=config.llm_model,
                 max_tokens=config.max_tokens,
                 temperature=0.7,
-                api_key=config.openai_api_key
+                api_key=config.openai_api_key,
+                dataset=dataset
             )
 
         # Initialize evaluator
@@ -285,29 +295,20 @@ class LangGraphAgenticDisambiguation:
             return response.content.strip(), token_count
 
     def _build_synthesis_prompt(self, question: str, subqueries: List[str], docs_context: str) -> str:
-        """Build prompt for answer synthesis."""
+        """Build prompt for answer synthesis using PromptRegistry."""
         is_unambiguous = len(subqueries) == 1 and subqueries[0] == question
-        
-        base_prompt = f"""Question: {question}
-Context: {docs_context}
 
-You are an expert QA system. Your goal is to provide:
-1. A SINGLE, CONCISE answer that is factually correct (e.g., a date, name, or short phrase).
-2. A synthesis explaining the answer, especially if there are multiple interpretations.
-3. Structured intents if the question is ambiguous.
+        # Get dataset-specific synthesis prompt
+        prompt_set = PromptRegistry.get_synthesis_prompt(self.dataset)
+        base_prompt = prompt_set.user.format(question=question, context=docs_context)
 
-Output strictly in JSON format:
-{{
-  "intents": [{{"intent_label": "Label", "confidence": 1.0, "key_facts": ["fact"]}}],
-  "synthesis": "Detailed explanation contrasting interpretations if needed...",
-  "concise_answer": "THE SINGLE BEST FACTUAL ANSWER"
-}}"""
-
-        if is_unambiguous:
-            return base_prompt + "\n\nThe question appears unambiguous. Provide the direct factual answer."
-        else:
+        # Add appropriate suffix based on ambiguity
+        suffix = PromptRegistry.get_synthesis_suffix(self.dataset, is_ambiguous=not is_unambiguous)
+        if not is_unambiguous:
             subq_list = "\n".join(f"- {sq}" for sq in subqueries)
-            return base_prompt + f"\n\nThe question is ambiguous. Consider these interpretations:\n{subq_list}\n\nProvide the best single answer in 'concise_answer', but explain the nuances in 'synthesis'."
+            suffix = suffix.format(subqueries=subq_list)
+
+        return base_prompt + suffix
 
     # ------------------------------------------------------------------------
     # Helper Functions for Ambiguity & Pruning
@@ -379,6 +380,7 @@ Output strictly in JSON format:
         """
         logger.debug(f"\n{'='*60}\n[STEP 1] AMBIGUITY DETECTION & COHERENCE CHECK\n{'='*60}")
         question = state["question"]
+        logger.debug(f"  Question: \"{question}\"")
         
         # 1. Initial Retrieval
         start_time = time.time()
@@ -388,7 +390,14 @@ Output strictly in JSON format:
         # 2. Coherence Check
         validity = self._assess_retrieval_validity(retrieved_docs)
         status = validity["status"]
-        
+
+        logger.debug(f"  Retrieved {len(retrieved_docs)} initial docs in {retrieval_time:.3f}s")
+        logger.debug(f"  Coherence Check Results:")
+        logger.debug(f"    - Status: {status}")
+        logger.debug(f"    - Variance: {validity.get('variance', 'N/A'):.3f}" if isinstance(validity.get('variance'), (int, float)) else f"    - Variance: {validity.get('variance', 'N/A')}")
+        logger.debug(f"    - Separability: {validity.get('separability', 'N/A'):.3f}" if isinstance(validity.get('separability'), (int, float)) else f"    - Separability: {validity.get('separability', 'N/A')}")
+        logger.debug(f"    - Reason: {validity['reason']}")
+
         if status == "Uncertain":
             logger.warning(f"Epistemic Failure detected! {validity['reason']}")
 
@@ -426,14 +435,23 @@ Output strictly in JSON format:
         # Determine K
         k = min(max(2, len(doc_texts) // 2), 4)
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10).fit(doc_embeddings)
-        
+
+        logger.debug(f"  Clustering {len(doc_texts)} documents into {k} clusters")
+
         # 2. Relevance Pruning
         RELEVANCE_THRESHOLD = 0.2
-        valid_clusters = [
-            i for i in range(k)
-            if cosine_similarity([query_embedding], [kmeans.cluster_centers_[i]])[0][0] >= RELEVANCE_THRESHOLD
-        ]
-        
+        cluster_relevances = []
+        for i in range(k):
+            relevance = cosine_similarity([query_embedding], [kmeans.cluster_centers_[i]])[0][0]
+            cluster_relevances.append((i, relevance))
+            cluster_size = sum(1 for label in kmeans.labels_ if label == i)
+            status = "✓ KEPT" if relevance >= RELEVANCE_THRESHOLD else "✗ PRUNED"
+            logger.debug(f"    - Cluster {i}: relevance={relevance:.3f}, size={cluster_size} docs [{status}]")
+
+        valid_clusters = [i for i, rel in cluster_relevances if rel >= RELEVANCE_THRESHOLD]
+
+        logger.debug(f"  Pruning Result: {len(valid_clusters)}/{k} clusters kept (threshold={RELEVANCE_THRESHOLD})")
+
         if not valid_clusters:
             logger.warning("All clusters pruned! Falling back to original question.")
             return {
@@ -444,24 +462,24 @@ Output strictly in JSON format:
             }
 
         # 3. Generate Sub-queries for Valid Clusters
+        logger.debug(f"  Generating sub-queries for {len(valid_clusters)} valid clusters...")
         generated_subqueries = []
         cluster_descriptions = []
 
         for cluster_idx in valid_clusters:
             cluster_docs = [retrieved_docs[j] for j, label in enumerate(kmeans.labels_) if label == cluster_idx]
             context_str = "\n".join([f"- {d.title}: {d.text[:200]}..." for d in cluster_docs[:3]])
-            
-            prompt = f"""Based on the following group of documents retrieved for the query "{question}", identify the specific interpretation they represent.
-            
-Documents:
-{context_str}
 
-Generate a SINGLE, specific question that focuses on this interpretation.
-Output ONLY the question."""
-            
+            # Use dataset-specific subquery cluster prompt
+            prompt_template = PromptRegistry.get_subquery_cluster_prompt(self.dataset)
+            prompt = prompt_template.format(question=question, context=context_str)
+
             subq, _ = await self._generate_text(prompt)
             generated_subqueries.append(subq)
             cluster_descriptions.append(f"Cluster {cluster_idx}: {subq}")
+            logger.debug(f"    - Cluster {cluster_idx} → \"{subq[:80]}...\"" if len(subq) > 80 else f"    - Cluster {cluster_idx} → \"{subq}\"")
+
+        logger.debug(f"  Generated {len(generated_subqueries)} sub-queries total")
 
         return {
             **state,
@@ -473,19 +491,9 @@ Output ONLY the question."""
     async def _generate_subqueries_llm_fallback(self, state: AgentState) -> AgentState:
         """Fallback to original LLM-based generation if clustering fails."""
         question = state["question"]
-        prompt = f"""The following question is ambiguous. Generate 2-4 specific questions that represent different interpretations.
-
-Original Question: {question}
-
-Requirements:
-- Each sub-query should be specific and unambiguous
-- Cover the most likely interpretations
-
-You MUST respond with ONLY valid JSON, no other text. Use this exact format:
-{{
-  "subqueries": ["specific question 1", "specific question 2", ...],
-  "reasoning": "Brief explanation of the different interpretations"
-}}"""
+        # Use dataset-specific fallback prompt
+        prompt_template = PromptRegistry.get_subquery_fallback_prompt(self.dataset)
+        prompt = prompt_template.format(question=question)
 
         try:
             response_text, _ = await self._generate_text(prompt)
@@ -600,19 +608,33 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
                     response_text = response_text.split("```json")[1].split("```")[0]
                 elif "```" in response_text:
                     response_text = response_text.split("```")[1].split("```")[0]
-                
+
                 data = json.loads(response_text.strip())
-                concise_answer = data.get("concise_answer", "")
-                synthesis = data.get("synthesis", "")
-                intents = data.get("intents", [])
+
+                # Handle dataset-specific JSON structures
+                if self.dataset == "asqa":
+                    # ASQA format: {"ambiguity_analysis", "interpretations_found", "long_answer"}
+                    long_answer = data.get("long_answer", "")
+                    concise_answer = long_answer  # For ASQA, the long answer IS the answer
+                    synthesis = long_answer
+                    # Convert interpretations to intents format for consistency
+                    interpretations = data.get("interpretations_found", [])
+                    intents = [{"intent_label": interp, "confidence": 1.0, "key_facts": []} for interp in interpretations]
+                    ambiguity_analysis = data.get("ambiguity_analysis", "")
+                    logger.debug(f"ASQA Ambiguity Analysis: {ambiguity_analysis[:100]}...")
+                else:
+                    # AmbigNQ format: {"intents", "synthesis", "concise_answer"}
+                    concise_answer = data.get("concise_answer", "")
+                    synthesis = data.get("synthesis", "")
+                    intents = data.get("intents", [])
             except json.JSONDecodeError:
                 # Fallback simple extraction
                 logger.warning(f"Failed to parse JSON from response: {response_text[:100]}...")
-                concise_answer = response_text[:100]
+                concise_answer = response_text[:100] if self.dataset != "asqa" else response_text
                 synthesis = response_text
                 intents = []
 
-            logger.debug(f"Final answer: '{concise_answer}'")
+            logger.debug(f"Final answer: '{concise_answer[:100]}...'" if len(concise_answer) > 100 else f"Final answer: '{concise_answer}'")
 
             return {
                 **state,
@@ -724,7 +746,12 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
         question_id: str,
         reference_data: Dict[str, Any]
     ) -> RAGResult:
-        """Run the LangGraph workflow on a single question."""
+        """
+        Run the LangGraph workflow on a single question (retrieval + generation only).
+
+        Evaluation is decoupled and runs in batch after all generations complete.
+        This improves performance when using heavy evaluation models like RoBERTa.
+        """
         # Initialize state
         initial_state: AgentState = {
             "question": question,
@@ -756,32 +783,8 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
 
             generated_answer = final_state["generated_answer"]
             synthesis = final_state["synthesis"]
-            
-            logger.debug(f"Evaluating answer: '{generated_answer}' (length: {len(generated_answer)})")
-            
-            # Primary Evaluation (Concise Answer vs Ground Truth)
-            evaluation = self.evaluator.evaluate_single(
-                prediction=generated_answer,
-                retrieved_docs=final_state["retrieved_docs"],
-                reference_item=reference_data,
-                retrieval_time=final_state["retrieval_time"],
-                generation_time=final_state["generation_time"],
-                total_tokens=final_state["total_tokens"]
-            )
 
-            # Secondary Evaluation (Synthesis vs Annotations for D-F1)
-            # The synthesis likely contains coverage of multiple interpretations
-            if synthesis:
-                annotations = reference_data.get('annotations', [])
-                d_f1, covered, total = compute_disambiguation_f1(
-                    synthesis,
-                    annotations,
-                    threshold=self.config.d_f1_threshold
-                )
-                evaluation["synthesis_d_f1"] = d_f1
-                evaluation["synthesis_covered"] = covered
-                evaluation["synthesis_total"] = total
-
+            # Note: Evaluation is decoupled - runs in batch after all generations complete
             return RAGResult(
                 question_id=question_id,
                 question=question,
@@ -791,7 +794,7 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
                 retrieval_time=final_state["retrieval_time"],
                 generation_time=final_state["generation_time"],
                 total_tokens=final_state["total_tokens"],
-                evaluation=evaluation,
+                evaluation={},  # Filled in post-processing batch evaluation
                 metadata={
                     "ambiguity_status": final_state.get("ambiguity_status"),
                     "is_ambiguous": final_state["is_ambiguous"],
@@ -822,7 +825,7 @@ You MUST respond with ONLY valid JSON, no other text. Use this exact format:
 
     async def _process_with_semaphore(self, item: Dict[str, Any], semaphore: asyncio.Semaphore) -> RAGResult:
         """Process a single item with concurrency control."""
-        question = item['question']
+        question = get_question_field(item, self.dataset)
         question_id = item.get('id', str(hash(question)))
         async with semaphore:
             try:
@@ -853,8 +856,11 @@ def main():
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+    # Dataset selection
+    parser.add_argument("--dataset", type=str, default="ambignq", choices=["ambignq", "asqa"], help="Dataset type")
+
     # Data paths
-    parser.add_argument("--data-path", type=str, default="data/ambignq_test.json")
+    parser.add_argument("--data-path", type=str, default=None, help="Path to test data (default: auto-select based on dataset)")
     parser.add_argument("--output-path", type=str, default=None, help="Path to save results (default: organized by approach/mode/model)")
 
     # Retrieval settings
@@ -896,8 +902,15 @@ def main():
     # Load environment
     load_dotenv()
 
+    # Set default data path based on dataset
+    if args.data_path is None:
+        if args.dataset == "asqa":
+            args.data_path = "data/asqa_test.json"
+        else:
+            args.data_path = "data/ambignq_test.json"
+
     # Load test data
-    logger.info(f"Loading test data from {args.data_path}...")
+    logger.info(f"Loading {args.dataset.upper()} test data from {args.data_path}...")
     with open(args.data_path, 'r') as f:
         test_data = json.load(f)
     logger.info(f"Loaded {len(test_data)} test examples")
@@ -922,7 +935,7 @@ def main():
                 raise ValueError("OPENAI_API_KEY environment variable not set. Use --use-local-llm to run without API.")
 
         # Initialize LangGraph framework
-        framework = LangGraphAgenticDisambiguation(config)
+        framework = LangGraphAgenticDisambiguation(config, dataset=args.dataset)
         framework._load_retriever(mode)
 
         # Determine output path for resume capability
@@ -957,6 +970,28 @@ def main():
         if test_data:
             results = asyncio.run(framework.run_batch(test_data, limit=args.limit))
             new_results = [r.to_dict() for r in results]
+
+            # Post-generation batch evaluation (decoupled for performance)
+            logger.info(f"\nRunning post-generation evaluation for {mode}...")
+            new_results = framework.evaluator.evaluate_results_post_generation(
+                new_results, show_progress=True
+            )
+
+            # Add synthesis D-F1 for agentic results (secondary evaluation)
+            logger.info(f"Computing synthesis D-F1 for agentic results...")
+            for result in new_results:
+                synthesis = result.get("metadata", {}).get("synthesis", "")
+                if synthesis and result.get("evaluation"):
+                    reference_data = result.get("reference_data", {})
+                    annotations = reference_data.get("annotations", [])
+                    d_f1, covered, total = compute_disambiguation_f1(
+                        synthesis,
+                        annotations,
+                        threshold=config.d_f1_threshold
+                    )
+                    result["evaluation"]["synthesis_d_f1"] = d_f1
+                    result["evaluation"]["synthesis_covered"] = covered
+                    result["evaluation"]["synthesis_total"] = total
         else:
             logger.info(f"All items already processed, skipping run")
             new_results = []
