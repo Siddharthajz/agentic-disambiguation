@@ -212,3 +212,4 @@ CLAUDE.md
 data/ambigqa_wiki_metadata.json
 data/ambigqa_wiki.index
 data/wiki_minilm.ndjson
+llama.cpp/
