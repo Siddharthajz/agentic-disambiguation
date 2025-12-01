@@ -19,6 +19,13 @@ from .retrievers import (
 from .generators import BaseGenerator, OpenAIGenerator, HyDEGenerator, LlamaCppGenerator, LLAMA_CPP_AVAILABLE
 from .cache import RetrievalCache
 from .config import RAGConfig
+from .prompts import (
+    DatasetType,
+    PromptRegistry,
+    PromptSet,
+    detect_dataset_from_item,
+    get_question_field,
+)
 from .output_utils import (
     get_model_name_from_config,
     get_organized_output_path,
@@ -26,7 +33,8 @@ from .output_utils import (
     load_existing_results,
     get_processed_question_ids,
     filter_unprocessed_data,
-    merge_results
+    merge_results,
+    _deterministic_hash as deterministic_hash,
 )
 
 __all__ = [
@@ -44,6 +52,11 @@ __all__ = [
     "LLAMA_CPP_AVAILABLE",
     "RetrievalCache",
     "RAGConfig",
+    "DatasetType",
+    "PromptRegistry",
+    "PromptSet",
+    "detect_dataset_from_item",
+    "get_question_field",
     "get_model_name_from_config",
     "get_organized_output_path",
     "ensure_output_directory",
@@ -51,4 +64,5 @@ __all__ = [
     "get_processed_question_ids",
     "filter_unprocessed_data",
     "merge_results",
+    "deterministic_hash",
 ]

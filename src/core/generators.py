@@ -18,6 +18,7 @@ import openai
 import tiktoken
 
 from .data_models import RetrievalResult
+from .prompts import PromptRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,8 @@ class BaseGenerator(ABC):
     async def generate(
         self,
         question: str,
-        contexts: List[RetrievalResult]
+        contexts: List[RetrievalResult],
+        dataset: str = "ambignq"
     ) -> Tuple[str, float, int]:
         """
         Generate answer for a question given retrieved contexts.
@@ -58,41 +60,46 @@ class BaseGenerator(ABC):
         Args:
             question: Question to answer
             contexts: Retrieved documents as context
+            dataset: Dataset type ("ambignq" or "asqa") for prompt selection
 
         Returns:
             Tuple of (answer, generation_time, total_tokens)
         """
         pass
 
-    def format_prompt(self, question: str, contexts: List[RetrievalResult]) -> str:
+    def format_prompt(
+        self,
+        question: str,
+        contexts: List[RetrievalResult],
+        dataset: str = "ambignq"
+    ) -> str:
         """
-        Format prompt for generation.
+        Format prompt for generation using dataset-specific templates.
 
         Args:
             question: Question to answer
             contexts: Retrieved contexts
+            dataset: Dataset type ("ambignq" or "asqa")
 
         Returns:
             Formatted prompt string
         """
-        context_str = "\n\n".join([
-            f"Document {ctx.rank} (Title: {ctx.title}):\n{ctx.text[:500]}"
-            for ctx in contexts
-        ])
+        context_str = PromptRegistry.format_context(contexts, max_chars=500)
+        prompt_set = PromptRegistry.get_generation_prompt(dataset)
+        return prompt_set.user.format(context=context_str, question=question)
 
-        prompt = f"""Using the context below, answer the question **only** with the final answer.
-- Be concise and factual.
-- Do not include explanations, reasoning, or extra text.
-- Respond with only the answer for automatic comparison with ground truth.
-- Do not state "Based on the context" or similar phrases, not even restating the question. Just provide the answer.
+    def get_system_prompt(self, dataset: str = "ambignq") -> Optional[str]:
+        """
+        Get the system prompt for generation.
 
-Context:
-{context_str}
+        Args:
+            dataset: Dataset type ("ambignq" or "asqa")
 
-Question: {question}
-
-Answer:"""
-        return prompt
+        Returns:
+            System prompt string or None
+        """
+        prompt_set = PromptRegistry.get_generation_prompt(dataset)
+        return prompt_set.system
 
 
 class OpenAIGenerator(BaseGenerator):
@@ -100,7 +107,7 @@ class OpenAIGenerator(BaseGenerator):
 
     def __init__(
         self,
-        model: str = "gpt-4.1-mini",
+        model: str = "gpt-4o-mini",
         max_tokens: int = 200,
         temperature: float = 0.0,
         api_key: Optional[str] = None
@@ -121,7 +128,8 @@ class OpenAIGenerator(BaseGenerator):
         # Load tokenizer for counting
         try:
             self.tokenizer = tiktoken.encoding_for_model(model)
-        except:
+        except KeyError:
+            # Model not found in tiktoken, use default encoding
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
         logger.info(f"OpenAI generator initialized: {model}")
@@ -129,7 +137,8 @@ class OpenAIGenerator(BaseGenerator):
     async def generate(
         self,
         question: str,
-        contexts: List[RetrievalResult]
+        contexts: List[RetrievalResult],
+        dataset: str = "ambignq"
     ) -> Tuple[str, float, int]:
         """
         Generate answer using OpenAI API.
@@ -137,26 +146,24 @@ class OpenAIGenerator(BaseGenerator):
         Args:
             question: Question to answer
             contexts: Retrieved contexts
+            dataset: Dataset type ("ambignq" or "asqa") for prompt selection
 
         Returns:
             Tuple of (answer, generation_time, total_tokens)
         """
-        prompt = self.format_prompt(question, contexts)
+        prompt = self.format_prompt(question, contexts, dataset)
+        system_prompt = self.get_system_prompt(dataset)
 
         start_time = time.time()
         try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant that answers questions based on provided context."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
+                messages=messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature
             )
@@ -214,10 +221,11 @@ class HyDEGenerator(OpenAIGenerator):
 
     def __init__(
         self,
-        model: str = "gpt-4.1-mini",
+        model: str = "gpt-4o-mini",
         max_tokens: int = 200,
         temperature: float = 0.7,  # Higher temp for diversity
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        dataset: str = "ambignq"
     ):
         """
         Initialize HyDE generator.
@@ -227,9 +235,11 @@ class HyDEGenerator(OpenAIGenerator):
             max_tokens: Max tokens for generation
             temperature: Sampling temperature (higher for diversity)
             api_key: OpenAI API key
+            dataset: Dataset type for prompt selection ("ambignq" or "asqa")
         """
         super().__init__(model=model, max_tokens=max_tokens, temperature=temperature, api_key=api_key)
-        logger.info("HyDE generator initialized")
+        self.dataset = dataset
+        logger.info(f"HyDE generator initialized for dataset: {dataset}")
 
     async def generate_hypothetical_document(self, question: str) -> Tuple[str, float, int]:
         """
@@ -241,11 +251,10 @@ class HyDEGenerator(OpenAIGenerator):
         Returns:
             Tuple of (hypothetical_document, generation_time, total_tokens)
         """
-        prompt = f"""Write a brief, factual passage that would appear in Wikipedia and contain the answer to this question:
-
-Question: {question}
-
-Write a 2-3 sentence passage that directly answers this question:"""
+        # Use dataset-specific HyDE prompt
+        prompt_set = PromptRegistry.get_hyde_prompt(self.dataset)
+        prompt = prompt_set.user.format(question=question)
+        system_prompt = prompt_set.system
 
         start_time = time.time()
         try:
@@ -254,7 +263,7 @@ Write a 2-3 sentence passage that directly answers this question:"""
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant that writes factual passages."
+                        "content": system_prompt
                     },
                     {
                         "role": "user",
@@ -428,7 +437,8 @@ class LlamaCppGenerator(BaseGenerator):
     async def generate(
         self,
         question: str,
-        contexts: List[RetrievalResult]
+        contexts: List[RetrievalResult],
+        dataset: str = "ambignq"
     ) -> Tuple[str, float, int]:
         """
         Generate answer for a question given retrieved contexts.
@@ -436,20 +446,21 @@ class LlamaCppGenerator(BaseGenerator):
         Args:
             question: Question to answer
             contexts: Retrieved documents as context
+            dataset: Dataset type ("ambignq" or "asqa") for prompt selection
 
         Returns:
             Tuple of (answer, generation_time, total_tokens)
         """
         # Use the same format_prompt method as OpenAI generator for consistency
-        prompt = self.format_prompt(question, contexts)
+        prompt = self.format_prompt(question, contexts, dataset)
 
-        # Clear system prompt - instructions are in the user prompt
+        # For local LLMs, embed system instructions in the user prompt for better results
         system_prompt = None
 
         start_time = time.time()
         try:
             # Run in executor to avoid blocking event loop
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             answer, tokens = await loop.run_in_executor(
                 None,
                 self._generate_sync,
@@ -485,7 +496,7 @@ Passage:"""
 
         start_time = time.time()
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             # Use higher temperature (0.7) for HyDE generation diversity
             document, tokens = await loop.run_in_executor(
                 None,

@@ -155,7 +155,11 @@ class SparseRetriever(BaseRetriever):
         Returns:
             List of retrieval results
         """
-        k = k or self.top_k
+        k = k if k is not None else self.top_k
+
+        # Handle k=0 edge case
+        if k == 0:
+            return []
 
         # Check cache
         cached = self._check_cache(query, k, "sparse")
@@ -244,7 +248,11 @@ class DenseRetriever(BaseRetriever):
 
     def get_cache_params(self) -> Dict[str, Any]:
         """Get cache parameters."""
-        return {"index": self.index_path, "encoder": self.encoder_name}
+        return {
+            "index": self.index_path,
+            "encoder": self.encoder_name,
+            "metadata": self.metadata_path  # Include metadata for cache correctness
+        }
 
     def retrieve(self, query: str, k: Optional[int] = None) -> List[RetrievalResult]:
         """
@@ -257,7 +265,11 @@ class DenseRetriever(BaseRetriever):
         Returns:
             List of retrieval results
         """
-        k = k or self.top_k
+        k = k if k is not None else self.top_k
+
+        # Handle k=0 edge case
+        if k == 0:
+            return []
 
         # Check cache
         cached = self._check_cache(query, k, "dense")
@@ -297,8 +309,27 @@ class DenseRetriever(BaseRetriever):
         return results
 
 
+def _normalize_title(title: str) -> str:
+    """
+    Normalize a title for deduplication matching.
+
+    Handles case differences, extra whitespace, and common variations.
+    """
+    if not title:
+        return ""
+    # Lowercase, strip whitespace, normalize multiple spaces
+    return " ".join(title.lower().strip().split())
+
+
 class HybridRetriever(BaseRetriever):
-    """Hybrid retriever using Reciprocal Rank Fusion (RRF)."""
+    """
+    Hybrid retriever using Reciprocal Rank Fusion (RRF).
+
+    Note: Uses title-based merging instead of doc_id-based merging because
+    sparse (PySerini) and dense (FAISS) retrievers may use different ID schemes.
+    Documents with the same normalized title from both sources will be properly
+    merged in RRF scoring.
+    """
 
     def __init__(
         self,
@@ -336,6 +367,10 @@ class HybridRetriever(BaseRetriever):
         """
         Retrieve using RRF fusion.
 
+        Uses title-based merging to handle different doc_id schemes between
+        sparse and dense retrievers. Documents with the same normalized title
+        will have their RRF scores combined.
+
         Args:
             query: Search query
             k: Number of documents (overrides self.top_k)
@@ -343,7 +378,11 @@ class HybridRetriever(BaseRetriever):
         Returns:
             List of retrieval results ranked by RRF
         """
-        k = k or self.top_k
+        k = k if k is not None else self.top_k
+
+        # Handle k=0 edge case
+        if k == 0:
+            return []
 
         # Check cache
         cached = self._check_cache(query, k, "hybrid")
@@ -354,33 +393,40 @@ class HybridRetriever(BaseRetriever):
         sparse_results = self.sparse_retriever.retrieve(query, k=k)
         dense_results = self.dense_retriever.retrieve(query, k=k)
 
-        # RRF scoring
-        rrf_scores = {}
-        doc_map = {}
+        # RRF scoring using normalized title as merge key
+        # This handles the case where sparse and dense use different doc_id schemes
+        rrf_scores = {}  # normalized_title -> RRF score
+        doc_map = {}     # normalized_title -> best RetrievalResult
 
         # Process sparse results
         for res in sparse_results:
-            rrf_scores[res.doc_id] = rrf_scores.get(res.doc_id, 0) + 1 / (self.rrf_k + res.rank)
-            doc_map[res.doc_id] = res
+            norm_title = _normalize_title(res.title)
+            # Use doc_id as fallback if title is empty/unknown
+            merge_key = norm_title if norm_title and norm_title != "unknown" else f"sparse_{res.doc_id}"
+            rrf_scores[merge_key] = rrf_scores.get(merge_key, 0) + 1 / (self.rrf_k + res.rank)
+            if merge_key not in doc_map:
+                doc_map[merge_key] = res
 
         # Process dense results
         for res in dense_results:
-            rrf_scores[res.doc_id] = rrf_scores.get(res.doc_id, 0) + 1 / (self.rrf_k + res.rank)
-            if res.doc_id not in doc_map:
-                doc_map[res.doc_id] = res
+            norm_title = _normalize_title(res.title)
+            merge_key = norm_title if norm_title and norm_title != "unknown" else f"dense_{res.doc_id}"
+            rrf_scores[merge_key] = rrf_scores.get(merge_key, 0) + 1 / (self.rrf_k + res.rank)
+            if merge_key not in doc_map:
+                doc_map[merge_key] = res
 
         # Sort by RRF score
-        sorted_doc_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        sorted_keys = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
 
         # Create final results
         results = []
-        for rank, doc_id in enumerate(sorted_doc_ids[:k], 1):
-            original = doc_map[doc_id]
+        for rank, merge_key in enumerate(sorted_keys[:k], 1):
+            original = doc_map[merge_key]
             results.append(RetrievalResult(
-                doc_id=doc_id,
+                doc_id=original.doc_id,
                 title=original.title,
                 text=original.text,
-                score=rrf_scores[doc_id],
+                score=rrf_scores[merge_key],
                 rank=rank,
                 source="hybrid"
             ))

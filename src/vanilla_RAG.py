@@ -5,11 +5,16 @@ Standard RAG pipeline: Retrieve → Generate
 Uses shared core components for retrieval and generation.
 """
 
+# Fix for Java/OpenMP conflict on Apple Silicon
+# Must be set BEFORE importing transformers/torch
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import argparse
 import asyncio
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -30,7 +35,9 @@ from core import (
     load_existing_results,
     get_processed_question_ids,
     filter_unprocessed_data,
-    merge_results
+    merge_results,
+    detect_dataset_from_item,
+    get_question_field,
 )
 from core.generators import LlamaCppGenerator
 from evaluation import RAGEvaluator, print_evaluation_report
@@ -51,7 +58,7 @@ class VanillaRAG:
     """
 
     def __init__(self, config: RAGConfig, use_local_llm: bool = False, local_model_path: str = None,
-                 local_context_size: int = 4096, local_gpu_layers: int = -1):
+                 local_context_size: int = 4096, local_gpu_layers: int = -1, dataset: str = "ambignq"):
         """
         Initialize vanilla RAG pipeline.
 
@@ -61,8 +68,10 @@ class VanillaRAG:
             local_model_path: Path to local GGUF model file
             local_context_size: Context window size for local LLM
             local_gpu_layers: GPU layers to offload (-1 for all)
+            dataset: Dataset type ("ambignq" or "asqa")
         """
         self.config = config
+        self.dataset = dataset
 
         # Setup cache
         self.cache = RetrievalCache(
@@ -132,7 +141,10 @@ class VanillaRAG:
         reference_data: Dict[str, Any]
     ) -> RAGResult:
         """
-        Run RAG pipeline on a single question.
+        Run RAG pipeline on a single question (retrieval + generation only).
+
+        Evaluation is decoupled and runs in batch after all generations complete.
+        This improves performance when using heavy evaluation models like RoBERTa.
 
         Args:
             question: Question to answer
@@ -140,28 +152,19 @@ class VanillaRAG:
             reference_data: Reference data for evaluation
 
         Returns:
-            RAG result with answer and metrics
+            RAG result with answer (evaluation is empty, filled in post-processing)
         """
         # Retrieval
         start_time = time.time()
         retrieved_docs = self.retriever.retrieve(question)
         retrieval_time = time.time() - start_time
 
-        # Generation
+        # Generation (with dataset-specific prompts)
         answer, generation_time, total_tokens = await self.generator.generate(
-            question, retrieved_docs
+            question, retrieved_docs, dataset=self.dataset
         )
 
-        # Evaluation
-        evaluation = self.evaluator.evaluate_single(
-            prediction=answer,
-            retrieved_docs=[doc.to_dict() for doc in retrieved_docs],
-            reference_item=reference_data,
-            retrieval_time=retrieval_time,
-            generation_time=generation_time,
-            total_tokens=total_tokens
-        )
-
+        # Note: Evaluation is decoupled - runs in batch after all generations complete
         return RAGResult(
             question_id=question_id,
             question=question,
@@ -171,7 +174,7 @@ class VanillaRAG:
             retrieval_time=retrieval_time,
             generation_time=generation_time,
             total_tokens=total_tokens,
-            evaluation=evaluation
+            evaluation={}  # Filled in post-processing batch evaluation
         )
 
     async def _process_with_semaphore(
@@ -180,7 +183,7 @@ class VanillaRAG:
         semaphore: asyncio.Semaphore
     ) -> RAGResult:
         """Process a single item with concurrency control."""
-        question = item['question']
+        question = get_question_field(item, self.dataset)
         question_id = item.get('id', str(hash(question)))
 
         async with semaphore:
@@ -238,12 +241,21 @@ def main():
         description="Vanilla RAG Baseline with optimized modular architecture"
     )
 
+    # Dataset selection
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="ambignq",
+        choices=["ambignq", "asqa"],
+        help="Dataset type (ambignq or asqa)"
+    )
+
     # Data paths
     parser.add_argument(
         "--data-path",
         type=str,
-        default="data/ambignq_test.json",
-        help="Path to AmbigNQ test data"
+        default=None,
+        help="Path to test data (default: auto-select based on dataset)"
     )
     parser.add_argument(
         "--output-path",
@@ -363,8 +375,15 @@ def main():
     # Load environment
     load_dotenv()
 
+    # Set default data path based on dataset
+    if args.data_path is None:
+        if args.dataset == "asqa":
+            args.data_path = "data/asqa_test.json"
+        else:
+            args.data_path = "data/ambignq_test.json"
+
     # Load test data
-    logger.info(f"Loading test data from {args.data_path}...")
+    logger.info(f"Loading {args.dataset.upper()} test data from {args.data_path}...")
     with open(args.data_path, 'r') as f:
         test_data = json.load(f)
     logger.info(f"Loaded {len(test_data)} test examples")
@@ -392,7 +411,8 @@ def main():
             use_local_llm=args.use_local_llm,
             local_model_path=args.local_model_path,
             local_context_size=args.local_context_size,
-            local_gpu_layers=args.local_gpu_layers
+            local_gpu_layers=args.local_gpu_layers,
+            dataset=args.dataset
         )
 
         # Load retriever for this mode
@@ -430,6 +450,12 @@ def main():
         if test_data:
             results = asyncio.run(rag.run_batch(test_data, limit=args.limit))
             new_results = [r.to_dict() for r in results]
+
+            # Post-generation batch evaluation (decoupled for performance)
+            logger.info(f"\nRunning post-generation evaluation for {mode}...")
+            new_results = rag.evaluator.evaluate_results_post_generation(
+                new_results, show_progress=True
+            )
         else:
             logger.info(f"All items already processed, skipping run")
             new_results = []

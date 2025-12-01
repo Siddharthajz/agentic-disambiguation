@@ -10,11 +10,16 @@ Multi-round RAG pipeline with iterative refinement:
 Uses shared core components for retrieval and generation.
 """
 
+# Fix for Java/OpenMP conflict on Apple Silicon
+# Must be set BEFORE importing transformers/torch
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import argparse
 import asyncio
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -36,7 +41,9 @@ from core import (
     load_existing_results,
     get_processed_question_ids,
     filter_unprocessed_data,
-    merge_results
+    merge_results,
+    detect_dataset_from_item,
+    get_question_field,
 )
 from evaluation import RAGEvaluator, print_evaluation_report
 
@@ -61,16 +68,18 @@ class IterativeRAG:
     3. Return best answer after max iterations
     """
 
-    def __init__(self, config: RAGConfig, max_iterations: int = 3):
+    def __init__(self, config: RAGConfig, max_iterations: int = 3, dataset: str = "ambignq"):
         """
         Initialize iterative RAG pipeline.
 
         Args:
             config: RAG configuration
             max_iterations: Maximum number of iterations
+            dataset: Dataset type ("ambignq" or "asqa")
         """
         self.config = config
         self.max_iterations = max_iterations
+        self.dataset = dataset
 
         # Setup cache - only create if explicitly enabled
         if config.use_cache:
@@ -362,9 +371,9 @@ Output ONLY the reformulated search query, nothing else."""
                     all_retrieved_docs.append(doc)
                     doc_ids.add(doc.doc_id)
 
-            # Generation
+            # Generation (with dataset-specific prompts)
             answer, generation_time, tokens = await self.generator.generate(
-                question, all_retrieved_docs[:self.config.top_k]
+                question, all_retrieved_docs[:self.config.top_k], dataset=self.dataset
             )
             total_generation_time += generation_time
             total_tokens += tokens
@@ -414,7 +423,7 @@ Output ONLY the reformulated search query, nothing else."""
         semaphore: asyncio.Semaphore
     ) -> RAGResult:
         """Process a single item with concurrency control."""
-        question = item['question']
+        question = get_question_field(item, self.dataset)
         question_id = item.get('id', str(hash(question)))
 
         async with semaphore:
@@ -472,8 +481,11 @@ def main():
         description="Iterative RAG Baseline with multi-round refinement"
     )
 
+    # Dataset selection
+    parser.add_argument("--dataset", type=str, default="ambignq", choices=["ambignq", "asqa"], help="Dataset type")
+
     # Data paths
-    parser.add_argument("--data-path", type=str, default="data/ambignq_test.json")
+    parser.add_argument("--data-path", type=str, default=None, help="Path to test data (default: auto-select based on dataset)")
     parser.add_argument("--output-path", type=str, default=None, help="Path to save results (default: organized by approach/mode/model)")
 
     # Retrieval settings
@@ -504,8 +516,15 @@ def main():
     # Load environment
     load_dotenv()
 
+    # Set default data path based on dataset
+    if args.data_path is None:
+        if args.dataset == "asqa":
+            args.data_path = "data/asqa_test.json"
+        else:
+            args.data_path = "data/ambignq_test.json"
+
     # Load test data
-    logger.info(f"Loading test data from {args.data_path}...")
+    logger.info(f"Loading {args.dataset.upper()} test data from {args.data_path}...")
     with open(args.data_path, 'r') as f:
         test_data = json.load(f)
     logger.info(f"Loaded {len(test_data)} test examples")
@@ -526,7 +545,7 @@ def main():
             raise ValueError("OPENAI_API_KEY environment variable not set")
 
         # Initialize iterative RAG
-        rag = IterativeRAG(config, max_iterations=args.max_iterations)
+        rag = IterativeRAG(config, max_iterations=args.max_iterations, dataset=args.dataset)
         rag._load_retriever(mode)
 
         # Determine output path for resume capability
