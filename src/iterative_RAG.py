@@ -557,7 +557,8 @@ def main():
                 approach="iterative",
                 retrieval_mode=mode,
                 model_name=model_name,
-                is_test=is_test
+                is_test=is_test, 
+                results_dir="../results"
             )
         else:
             output_path = Path(args.output_path)
