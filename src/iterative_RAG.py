@@ -370,10 +370,12 @@ Output ONLY the reformulated search query, nothing else."""
                 if doc.doc_id not in doc_ids:
                     all_retrieved_docs.append(doc)
                     doc_ids.add(doc.doc_id)
+            sorted_docs = sorted(all_retrieved_docs, key=lambda d: d.score, reverse=True)
+            top_docs = sorted_docs[:self.config.top_k]
 
             # Generation (with dataset-specific prompts)
             answer, generation_time, tokens = await self.generator.generate(
-                question, all_retrieved_docs[:self.config.top_k], dataset=self.dataset
+                question, top_docs, dataset=self.dataset
             )
             total_generation_time += generation_time
             total_tokens += tokens
@@ -491,9 +493,9 @@ def main():
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="sparse", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="data/ambigqa_wiki.index")
+    parser.add_argument("--dense-index", type=str, default="../data/ambigqa_wiki.index")
     parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2")
-    parser.add_argument("--dense-metadata", type=str, default="data/ambigqa_wiki_metadata.json")
+    parser.add_argument("--dense-metadata", type=str, default="../data/ambigqa_wiki_metadata.json")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings
@@ -510,7 +512,6 @@ def main():
 
     # Experiment settings
     parser.add_argument("--limit", type=int, default=None)
-
     args = parser.parse_args()
 
     # Load environment
@@ -519,9 +520,9 @@ def main():
     # Set default data path based on dataset
     if args.data_path is None:
         if args.dataset == "asqa":
-            args.data_path = "data/asqa_test.json"
+            args.data_path = "../data/asqa_test.json"
         else:
-            args.data_path = "data/ambignq_test.json"
+            args.data_path = "../data/ambignq_test.json"
 
     # Load test data
     logger.info(f"Loading {args.dataset.upper()} test data from {args.data_path}...")
