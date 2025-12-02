@@ -154,33 +154,40 @@ Passage (focus on distinguishing details):"""
 
 ASQA_SYNTHESIS_SYSTEM = (
     "You are an expert question-answering system that provides comprehensive answers. "
-    "Your answers should be detailed, well-organized, and address all interpretations of ambiguous questions."
+    "Your answers should be detailed, well-organized, and address ALL interpretations of ambiguous questions. "
+    "You must include specific factual details (exact dates, full names, numbers) in your answers."
 )
 
 ASQA_SYNTHESIS_USER = """Question: {question}
 Context: {context}
 
 Task:
-Produce an ASQA-style synthesized answer.  
-Your long answer must:
-- Contain all facts needed for a downstream QA model to answer the question.
-- Combine all interpretations into a single coherent passage.
-- Be concise: **exactly 3–4 sentences**, no more.
-- Use smooth transitions and avoid lists, bullets, or meta commentary.
+Produce an ASQA-style synthesized answer that covers ALL interpretations.
+
+CRITICAL REQUIREMENTS:
+1. **Extract ALL distinct short answers** from the context (e.g., specific dates like "June 28, 2003", names like "David Scott", numbers).
+2. **Include EVERY short answer explicitly** in your long_answer - a QA model must be able to extract each one.
+3. **Be specific** - use exact dates (not just "2003", but "July 9, 2003"), full names, and precise facts.
+4. **Cover ALL interpretations** - if there are multiple versions/dates/people, mention ALL of them.
+
+Your long_answer must:
+- Explicitly state ALL specific facts/dates/names that answer different interpretations of the question.
+- Be 3–5 sentences combining all interpretations into a coherent passage.
+- Use smooth transitions (e.g., "while", "however", "in contrast").
 
 Formatting rules:
 - Output **only** valid JSON.
 - No text before or after the JSON block.
-- Keep "ambiguity_analysis" and "interpretations_found" short and precise.
 
 JSON schema:
 {{
-  "ambiguity_analysis": "1–2 sentences explaining why the question is ambiguous.",
+  "ambiguity_analysis": "1–2 sentences explaining why the question is ambiguous (what are the different interpretations?).",
   "interpretations_found": [
-    "Short label for Interpretation 1",
-    "Short label for Interpretation 2"
+    "Label 1 (with specific answer)",
+    "Label 2 (with specific answer)"
   ],
-  "long_answer": "A unified 3–4 sentence passage synthesizing all interpretations and containing all needed facts. No lists or filler."
+  "short_answers_extracted": ["answer1", "answer2"],
+  "long_answer": "A unified 3–5 sentence passage that EXPLICITLY includes ALL short answers. Each interpretation's specific answer (date, name, etc.) MUST appear verbatim in this text."
 }}
 
 JSON Output:
@@ -188,14 +195,14 @@ JSON Output:
 
 ASQA_SYNTHESIS_UNAMBIGUOUS_SUFFIX = """
 
-The question appears to have a single interpretation. Provide a detailed, comprehensive answer with supporting evidence."""
+The question appears to have a single interpretation. Provide a detailed answer with the EXACT specific answer (date, name, number, etc.)."""
 
 ASQA_SYNTHESIS_AMBIGUOUS_SUFFIX = """
 
-The question has multiple interpretations. Consider these specific aspects:
+The question has multiple interpretations. You MUST cover ALL of these:
 {subqueries}
 
-Address each interpretation in your long_answer with specific evidence."""
+IMPORTANT: Your long_answer MUST explicitly state the specific answer (exact date, full name, etc.) for EACH interpretation listed above. Do not omit any."""
 
 ASQA_SUBQUERY_FROM_CLUSTER = """Based on the following group of documents retrieved for the query "{question}", identify the specific interpretation or aspect they represent.
 

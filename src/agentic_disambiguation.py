@@ -64,7 +64,7 @@ from core import (
     get_question_field,
     PromptRegistry,
 )
-from evaluation import RAGEvaluator, print_evaluation_report, compute_disambiguation_f1
+from evaluation import RAGEvaluator, print_evaluation_report, compute_disambiguation_f1, compute_disambiguation_f1_asqa, detect_dataset_type, DatasetType
 
 # Setup logging
 logging.basicConfig(
@@ -189,16 +189,18 @@ class LangGraphAgenticDisambiguation:
             logger.info("Initializing with LOCAL LLM (llama.cpp)")
             logger.info(f"Model path: {config.local_model_path}")
 
-            # Initialize single local LLM generator (shared for all tasks)
+            # Initialize single local LLM generator with dataset awareness
             self.generator = LlamaCppGenerator(
                 model_path=config.local_model_path,
                 max_tokens=config.max_tokens,
                 temperature=config.temperature,
                 n_ctx=config.local_context_size,
                 n_gpu_layers=config.local_gpu_layers,
-                verbose=False
+                verbose=False,
+                dataset=dataset  # Pass dataset for prompt selection
             )
 
+            # HyDE generator uses same instance with dataset-aware prompts
             self.hyde_generator = self.generator
             self.llm = None
 
@@ -317,6 +319,10 @@ class LangGraphAgenticDisambiguation:
     def _assess_retrieval_validity(self, docs: List[RetrievalResult]) -> Dict[str, Any]:
         """
         Assess the validity of retrieved documents using Coherence Check.
+        
+        Uses dataset-aware thresholds:
+        - AmbigNQ: Standard thresholds (questions may or may not be ambiguous)
+        - ASQA: Lower thresholds (all questions are designed to be ambiguous)
         """
         if not docs or not self.encoder_model:
             return {"status": "Uncertain", "reason": "No docs or no encoder"}
@@ -344,23 +350,45 @@ class LangGraphAgenticDisambiguation:
         except Exception:
             separability = 0.0
 
-        # Thresholds (tunable)
-        VARIANCE_THRESHOLD = 0.8 
-        SEPARABILITY_THRESHOLD = 0.1 
-        
-        status = "Unambiguous"
-        reason = f"Variance: {avg_distance:.2f}, Separability: {separability:.2f}"
-
-        if avg_distance > VARIANCE_THRESHOLD:
-            if separability < SEPARABILITY_THRESHOLD:
+        # Dataset-aware thresholds
+        # ASQA: All questions are inherently ambiguous, use much lower thresholds
+        # AmbigNQ: Use standard thresholds
+        if self.dataset == "asqa":
+            # ASQA: Assume ambiguity by default since all questions are designed to be ambiguous
+            # Only mark as unambiguous if separability is very low AND variance is low
+            VARIANCE_THRESHOLD = 0.5  # Lower threshold for ASQA
+            SEPARABILITY_THRESHOLD = 0.0  # Effectively always detect ambiguity for ASQA
+            
+            # For ASQA, default to Ambiguous unless very strong evidence otherwise
+            status = "Ambiguous"
+            reason = f"ASQA default ambiguous (Variance: {avg_distance:.2f}, Separability: {separability:.2f})"
+            
+            if avg_distance < 0.3 and separability < 0.0:
+                # Very homogeneous docs - might be unambiguous
+                status = "Unambiguous"
+                reason = f"Low variance ({avg_distance:.2f}) suggests single interpretation"
+            elif avg_distance > 1.0 and separability < 0.0:
+                # High variance but no clear clusters - epistemic uncertainty
                 status = "Uncertain"
                 reason = f"Epistemic Failure: High Variance ({avg_distance:.2f}) & Low Separability ({separability:.2f})"
-            else:
-                status = "Ambiguous"
-                reason = f"Ambiguous: Distinct clusters detected (Sep: {separability:.2f})"
-        elif separability > SEPARABILITY_THRESHOLD:
-             status = "Ambiguous"
-             reason = f"Ambiguous: Distinct clusters detected (Sep: {separability:.2f})"
+        else:
+            # AmbigNQ: Standard thresholds
+            VARIANCE_THRESHOLD = 0.8 
+            SEPARABILITY_THRESHOLD = 0.1 
+            
+            status = "Unambiguous"
+            reason = f"Variance: {avg_distance:.2f}, Separability: {separability:.2f}"
+
+            if avg_distance > VARIANCE_THRESHOLD:
+                if separability < SEPARABILITY_THRESHOLD:
+                    status = "Uncertain"
+                    reason = f"Epistemic Failure: High Variance ({avg_distance:.2f}) & Low Separability ({separability:.2f})"
+                else:
+                    status = "Ambiguous"
+                    reason = f"Ambiguous: Distinct clusters detected (Sep: {separability:.2f})"
+            elif separability > SEPARABILITY_THRESHOLD:
+                 status = "Ambiguous"
+                 reason = f"Ambiguous: Distinct clusters detected (Sep: {separability:.2f})"
         
         return {
             "status": status,
@@ -613,15 +641,18 @@ class LangGraphAgenticDisambiguation:
 
                 # Handle dataset-specific JSON structures
                 if self.dataset == "asqa":
-                    # ASQA format: {"ambiguity_analysis", "interpretations_found", "long_answer"}
+                    # ASQA format: {"ambiguity_analysis", "interpretations_found", "short_answers_extracted", "long_answer"}
                     long_answer = data.get("long_answer", "")
                     concise_answer = long_answer  # For ASQA, the long answer IS the answer
                     synthesis = long_answer
+                    # Extract short answers for debugging and potential use in evaluation
+                    short_answers_extracted = data.get("short_answers_extracted", [])
                     # Convert interpretations to intents format for consistency
                     interpretations = data.get("interpretations_found", [])
-                    intents = [{"intent_label": interp, "confidence": 1.0, "key_facts": []} for interp in interpretations]
+                    intents = [{"intent_label": interp, "confidence": 1.0, "key_facts": short_answers_extracted} for interp in interpretations]
                     ambiguity_analysis = data.get("ambiguity_analysis", "")
                     logger.debug(f"ASQA Ambiguity Analysis: {ambiguity_analysis[:100]}...")
+                    logger.debug(f"ASQA Short Answers Extracted: {short_answers_extracted}")
                 else:
                     # AmbigNQ format: {"intents", "synthesis", "concise_answer"}
                     concise_answer = data.get("concise_answer", "")
@@ -658,14 +689,35 @@ class LangGraphAgenticDisambiguation:
             }
 
     def should_decompose(self, state: AgentState) -> str:
-        """Conditional edge: Decide whether to decompose question."""
+        """
+        Conditional edge: Decide whether to decompose question.
+        
+        For ASQA: Always decompose since all questions are designed to be ambiguous.
+        For AmbigNQ: Use ambiguity detection results.
+        """
         status = state.get("ambiguity_status", "Ambiguous")
+        
+        # ASQA: Always decompose - all questions are inherently ambiguous
+        # Only fallback for severe epistemic failure
+        if self.dataset == "asqa":
+            if status == "Uncertain":
+                # Even for epistemic uncertainty, try decomposition for ASQA
+                logger.info("ASQA: Forcing decomposition despite epistemic uncertainty")
+                return "generate_subqueries"
+            return "generate_subqueries"
+        
+        # AmbigNQ: Use standard ambiguity detection
         if status == "Uncertain":
             return "simple_retrieval"  # Fallback for epistemic failure
         return "generate_subqueries" if state.get("is_ambiguous", True) else "simple_retrieval"
 
     async def simple_retrieval_node(self, state: AgentState) -> AgentState:
-        """Alternative path: Simple retrieval for unambiguous questions."""
+        """
+        Alternative path: Simple retrieval for unambiguous questions.
+        
+        For ASQA: Enhanced retrieval using HyDE even in simple path.
+        For AmbigNQ: Standard retrieval.
+        """
         question = state["question"]
         existing_docs = state.get("retrieved_docs", [])
         
@@ -679,11 +731,33 @@ class LangGraphAgenticDisambiguation:
 
         start_time = time.time()
         try:
-            results = self.retriever.retrieve(question, k=self.config.top_k)
+            # For ASQA: Use HyDE-enhanced retrieval even in simple path
+            if self.dataset == "asqa":
+                # Generate HyDE document for better retrieval
+                hyde_doc, _, _ = await self.hyde_generator.generate_hypothetical_document(question)
+                
+                # Retrieve using both original question and HyDE doc
+                query_results = self.retriever.retrieve(question, k=self.config.top_k)
+                hyde_results = self.retriever.retrieve(hyde_doc, k=self.config.top_k)
+                
+                # Deduplicate and merge
+                doc_map = {}
+                for doc in query_results + hyde_results:
+                    if doc.doc_id not in doc_map or doc.score > doc_map[doc.doc_id].score:
+                        doc_map[doc.doc_id] = doc
+                
+                results = sorted(doc_map.values(), key=lambda x: x.score, reverse=True)[:self.config.top_k]
+                hyde_documents = {question: hyde_doc}
+                logger.debug(f"ASQA simple path: HyDE-enhanced retrieval, {len(results)} docs")
+            else:
+                # AmbigNQ: Standard retrieval
+                results = self.retriever.retrieve(question, k=self.config.top_k)
+                hyde_documents = {question: question}
+            
             return {
                 **state,
                 "subqueries": [question],
-                "hyde_documents": {question: question},
+                "hyde_documents": hyde_documents,
                 "retrieved_docs": [doc.to_dict() for doc in results],
                 "retrieval_time": time.time() - start_time,
                 "messages": [HumanMessage(content=f"Simple retrieval: {len(results)} documents")],
@@ -946,7 +1020,8 @@ def main():
                 approach="agentic",
                 retrieval_mode=mode,
                 model_name=model_name,
-                is_test=is_test
+                is_test=is_test,
+                dataset=args.dataset
             )
         else:
             output_path = Path(args.output_path)
@@ -983,12 +1058,24 @@ def main():
                 synthesis = result.get("metadata", {}).get("synthesis", "")
                 if synthesis and result.get("evaluation"):
                     reference_data = result.get("reference_data", {})
-                    annotations = reference_data.get("annotations", [])
-                    d_f1, covered, total = compute_disambiguation_f1(
-                        synthesis,
-                        annotations,
-                        threshold=config.d_f1_threshold
-                    )
+                    # Use dataset-appropriate D-F1 computation
+                    dataset_type = detect_dataset_type(reference_data)
+                    if dataset_type == DatasetType.ASQA:
+                        # ASQA uses qa_pairs with QA-based extraction
+                        d_f1, covered, total = compute_disambiguation_f1_asqa(
+                            synthesis,
+                            reference_data,
+                            threshold=config.d_f1_threshold,
+                            use_qa_model=True
+                        )
+                    else:
+                        # AmbigNQ uses annotations with token overlap
+                        annotations = reference_data.get("annotations", [])
+                        d_f1, covered, total = compute_disambiguation_f1(
+                            synthesis,
+                            annotations,
+                            threshold=config.d_f1_threshold
+                        )
                     result["evaluation"]["synthesis_d_f1"] = d_f1
                     result["evaluation"]["synthesis_covered"] = covered
                     result["evaluation"]["synthesis_total"] = total
@@ -1036,27 +1123,29 @@ def main():
             logger.info(f"\nCache stats: {cache_stats}")
 
     # Results already saved during loop, just log summary
-    if args.retrieval_mode == "all":
-        logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
-        if args.output_path is None:
-            data = all_results[modes_to_run[0]]
-            model_name = get_model_name_from_config(data["config"])
-            is_test = args.limit is not None and args.limit < 100
-            base_output = get_organized_output_path(
-                approach="agentic",
-                retrieval_mode=modes_to_run[0],
-                model_name=model_name,
-                is_test=is_test
-            )
-            logger.info(f"\nAll results saved in: {base_output.parent}")
-            for mode in modes_to_run:
-                mode_output = get_organized_output_path(
+        if args.retrieval_mode == "all":
+            logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
+            if args.output_path is None:
+                data = all_results[modes_to_run[0]]
+                model_name = get_model_name_from_config(data["config"])
+                is_test = args.limit is not None and args.limit < 100
+                base_output = get_organized_output_path(
                     approach="agentic",
-                    retrieval_mode=mode,
+                    retrieval_mode=modes_to_run[0],
                     model_name=model_name,
-                    is_test=is_test
+                    is_test=is_test,
+                    dataset=args.dataset
                 )
-                logger.info(f"  - {mode_output.name}")
+                logger.info(f"\nAll results saved in: {base_output.parent}")
+                for mode in modes_to_run:
+                    mode_output = get_organized_output_path(
+                        approach="agentic",
+                        retrieval_mode=mode,
+                        model_name=model_name,
+                        is_test=is_test,
+                        dataset=args.dataset
+                    )
+                    logger.info(f"  - {mode_output.name}")
     else:
         # Results already saved, just log
         if args.output_path is None:
@@ -1067,7 +1156,8 @@ def main():
                 approach="agentic",
                 retrieval_mode=args.retrieval_mode,
                 model_name=model_name,
-                is_test=is_test
+                is_test=is_test,
+                dataset=args.dataset
             )
         else:
             output_path = Path(args.output_path)

@@ -347,7 +347,8 @@ class LlamaCppGenerator(BaseGenerator):
         top_p: float = 0.8,  # Qwen recommended: 0.8
         top_k: int = 20,  # Qwen recommended: 20
         repeat_penalty: float = 1.1,  # Slight penalty to reduce repetition
-        verbose: bool = False
+        verbose: bool = False,
+        dataset: str = "ambignq"  # Dataset type for prompt selection
     ):
         """
         Initialize llama.cpp generator.
@@ -362,6 +363,7 @@ class LlamaCppGenerator(BaseGenerator):
             top_k: Top-k sampling (Qwen recommends 20)
             repeat_penalty: Repetition penalty (1.1 for slight reduction)
             verbose: Enable verbose llama.cpp logging
+            dataset: Dataset type ("ambignq" or "asqa") for prompt selection
         """
         if not LLAMA_CPP_AVAILABLE:
             raise ImportError(
@@ -377,10 +379,12 @@ class LlamaCppGenerator(BaseGenerator):
         self.top_p = top_p
         self.top_k = top_k
         self.repeat_penalty = repeat_penalty
+        self.dataset = dataset  # Dataset type for prompt selection
 
         logger.info(f"Loading local LLM from {model_path}...")
         logger.info(f"GPU layers: {n_gpu_layers}, Context size: {n_ctx}")
         logger.info(f"Sampling params: temp={temperature}, top_p={top_p}, top_k={top_k}")
+        logger.info(f"Dataset: {dataset}")
 
         self.llm = Llama(
             model_path=model_path,
@@ -479,20 +483,20 @@ class LlamaCppGenerator(BaseGenerator):
         """
         Generate a hypothetical document for HyDE retrieval.
 
+        Uses dataset-specific prompts from PromptRegistry for optimal generation:
+        - AmbigNQ: Brief factual passages with specific entities
+        - ASQA: Detailed passages that differentiate between interpretations
+
         Args:
             question: Question to generate document for
 
         Returns:
             Tuple of (document, generation_time, total_tokens)
         """
-        prompt = f"""Write a brief, factual passage that would appear in Wikipedia and contain the answer to this question. Output ONLY the passage, with no preamble or explanation.
-
-Question: {question}
-
-Passage:"""
-
-        # No system prompt - instructions are in user prompt for consistency
-        system_prompt = None
+        # Use dataset-specific HyDE prompt from PromptRegistry
+        prompt_set = PromptRegistry.get_hyde_prompt(self.dataset)
+        prompt = prompt_set.user.format(question=question)
+        system_prompt = prompt_set.system
 
         start_time = time.time()
         try:

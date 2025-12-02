@@ -426,7 +426,8 @@ def main():
                 approach="vanilla",
                 retrieval_mode=mode,
                 model_name=model_name,
-                is_test=is_test
+                is_test=is_test,
+                dataset=args.dataset
             )
         else:
             output_path = Path(args.output_path)
@@ -501,7 +502,8 @@ def main():
                     approach="vanilla",
                     retrieval_mode=mode,
                     model_name=model_name,
-                    is_test=is_test
+                    is_test=is_test,
+                    dataset=args.dataset
                 )
                 ensure_output_directory(mode_output)
             else:
@@ -522,7 +524,8 @@ def main():
                 approach="vanilla",
                 retrieval_mode=args.retrieval_mode,
                 model_name=model_name,
-                is_test=is_test
+                is_test=is_test,
+                dataset=args.dataset
             )
         else:
             output_path = Path(args.output_path)
