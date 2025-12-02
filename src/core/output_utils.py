@@ -57,10 +57,13 @@ def get_organized_output_path(
     retrieval_mode: str,
     model_name: str,
     is_test: bool = False,
-    results_dir: str = "results"
+    results_dir: str = "results",
+    dataset: str = "ambignq"
 ) -> Path:
     """
     Generate organized output path following standard structure.
+
+    Structure: results/{dataset}/{approach}/{retrieval_mode}/{model_name}/results.json
 
     Args:
         approach: RAG approach ("vanilla", "iterative", "agentic")
@@ -68,18 +71,22 @@ def get_organized_output_path(
         model_name: Model name (e.g., "gpt-4o-mini", "qwen2.5-3b-q4")
         is_test: Whether this is a test run
         results_dir: Base results directory (default: "results")
+        dataset: Dataset type ("ambignq" or "asqa", default: "ambignq")
 
     Returns:
         Path object for output file
 
     Example:
         >>> get_organized_output_path("vanilla", "sparse", "gpt-4o-mini")
-        PosixPath('results/vanilla/sparse/gpt-4o-mini/results.json')
-        >>> get_organized_output_path("agentic", "hybrid", "qwen2.5-3b-q4", is_test=True)
-        PosixPath('results/agentic/hybrid/qwen2.5-3b-q4/results_test.json')
+        PosixPath('results/ambignq/vanilla/sparse/gpt-4o-mini/results.json')
+        >>> get_organized_output_path("agentic", "hybrid", "qwen2.5-3b-q4", is_test=True, dataset="asqa")
+        PosixPath('results/asqa/agentic/hybrid/qwen2.5-3b-q4/results_test.json')
     """
-    # Create directory structure
-    output_dir = Path(results_dir) / approach / retrieval_mode / model_name
+    # Normalize dataset name
+    dataset = dataset.lower().strip()
+    
+    # Create directory structure: results/{dataset}/{approach}/{retrieval_mode}/{model_name}
+    output_dir = Path(results_dir) / dataset / approach / retrieval_mode / model_name
 
     # Create filename
     filename = "results_test.json" if is_test else "results.json"
