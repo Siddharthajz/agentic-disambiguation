@@ -493,9 +493,9 @@ def main():
     # Retrieval settings
     parser.add_argument("--retrieval-mode", type=str, default="sparse", choices=["sparse", "dense", "hybrid", "all"])
     parser.add_argument("--sparse-index", type=str, default="wikipedia-dpr")
-    parser.add_argument("--dense-index", type=str, default="../data/ambigqa_wiki.index")
-    parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2")
-    parser.add_argument("--dense-metadata", type=str, default="../data/ambigqa_wiki_metadata.json")
+    parser.add_argument("--dense-index", type=str, default="data/ambigqa_wiki.index", help="Path to FAISS index file")
+    parser.add_argument("--dense-encoder", type=str, default="all-MiniLM-L6-v2", help="Sentence-transformers model name for query encoding")
+    parser.add_argument("--dense-metadata", type=str, default="data/ambigqa_wiki_metadata.json", help="Path to metadata JSON file for dense retrieval")
     parser.add_argument("--top-k", type=int, default=5)
 
     # Generation settings
@@ -520,9 +520,9 @@ def main():
     # Set default data path based on dataset
     if args.data_path is None:
         if args.dataset == "asqa":
-            args.data_path = "../data/asqa_test.json"
+            args.data_path = "data/asqa_test.json"
         else:
-            args.data_path = "../data/ambignq_test.json"
+            args.data_path = "data/ambignq_test.json"
 
     # Load test data
     logger.info(f"Loading {args.dataset.upper()} test data from {args.data_path}...")
@@ -557,8 +557,8 @@ def main():
                 approach="iterative",
                 retrieval_mode=mode,
                 model_name=model_name,
-                is_test=is_test, 
-                results_dir="../results"
+                is_test=is_test,
+                dataset=args.dataset
             )
         else:
             output_path = Path(args.output_path)
@@ -582,6 +582,12 @@ def main():
         if test_data:
             results = asyncio.run(rag.run_batch(test_data, limit=args.limit))
             new_results = [r.to_dict() for r in results]
+
+            # Post-generation batch evaluation (decoupled for performance)
+            logger.info(f"\nRunning post-generation evaluation for {mode}...")
+            new_results = rag.evaluator.evaluate_results_post_generation(
+                new_results, show_progress=True
+            )
         else:
             logger.info(f"All items already processed, skipping run")
             new_results = []
@@ -620,10 +626,44 @@ def main():
     # Final summary if running all modes
     if args.retrieval_mode == "all":
         logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
-        logger.info(f"\nAll results saved in: {output_path.parent}")
-        for mode in modes_to_run:
-            mode_output = output_path.parent / f"{output_path.stem}_{mode}{output_path.suffix}"
-            logger.info(f"  - {mode_output.name}")
+        if args.output_path is None:
+            data = all_results[modes_to_run[0]]
+            model_name = get_model_name_from_config(data["config"])
+            is_test = args.limit is not None and args.limit < 100
+            base_output = get_organized_output_path(
+                approach="iterative",
+                retrieval_mode=modes_to_run[0],
+                model_name=model_name,
+                is_test=is_test,
+                dataset=args.dataset
+            )
+            logger.info(f"\nAll results saved in: {base_output.parent}")
+            for mode in modes_to_run:
+                mode_output = get_organized_output_path(
+                    approach="iterative",
+                    retrieval_mode=mode,
+                    model_name=model_name,
+                    is_test=is_test,
+                    dataset=args.dataset
+                )
+                logger.info(f"  - {mode_output.name}")
+    else:
+        # Results already saved, just log
+        if args.output_path is None:
+            data = all_results[args.retrieval_mode]
+            model_name = get_model_name_from_config(data["config"])
+            is_test = args.limit is not None and args.limit < 100
+            output_path = get_organized_output_path(
+                approach="iterative",
+                retrieval_mode=args.retrieval_mode,
+                model_name=model_name,
+                is_test=is_test,
+                dataset=args.dataset
+            )
+        else:
+            output_path = Path(args.output_path)
+        
+        logger.info(f"\nResults saved to {output_path}")
 
 
 if __name__ == "__main__":

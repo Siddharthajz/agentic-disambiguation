@@ -1123,29 +1123,29 @@ def main():
             logger.info(f"\nCache stats: {cache_stats}")
 
     # Results already saved during loop, just log summary
-        if args.retrieval_mode == "all":
-            logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
-            if args.output_path is None:
-                data = all_results[modes_to_run[0]]
-                model_name = get_model_name_from_config(data["config"])
-                is_test = args.limit is not None and args.limit < 100
-                base_output = get_organized_output_path(
+    if args.retrieval_mode == "all":
+        logger.info(f"\n{'='*60}\n  ALL MODES COMPLETED\n{'='*60}")
+        if args.output_path is None:
+            data = all_results[modes_to_run[0]]
+            model_name = get_model_name_from_config(data["config"])
+            is_test = args.limit is not None and args.limit < 100
+            base_output = get_organized_output_path(
+                approach="agentic",
+                retrieval_mode=modes_to_run[0],
+                model_name=model_name,
+                is_test=is_test,
+                dataset=args.dataset
+            )
+            logger.info(f"\nAll results saved in: {base_output.parent}")
+            for mode in modes_to_run:
+                mode_output = get_organized_output_path(
                     approach="agentic",
-                    retrieval_mode=modes_to_run[0],
+                    retrieval_mode=mode,
                     model_name=model_name,
                     is_test=is_test,
                     dataset=args.dataset
                 )
-                logger.info(f"\nAll results saved in: {base_output.parent}")
-                for mode in modes_to_run:
-                    mode_output = get_organized_output_path(
-                        approach="agentic",
-                        retrieval_mode=mode,
-                        model_name=model_name,
-                        is_test=is_test,
-                        dataset=args.dataset
-                    )
-                    logger.info(f"  - {mode_output.name}")
+                logger.info(f"  - {mode_output.name}")
     else:
         # Results already saved, just log
         if args.output_path is None:
