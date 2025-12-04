@@ -43,6 +43,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 
+
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
 from core import (
     RAGConfig,
     RetrievalCache,
@@ -235,6 +239,25 @@ class LangGraphAgenticDisambiguation:
             k=config.top_k,
             d_f1_threshold=config.d_f1_threshold
         )
+        #Ambiguity Detection Settings 
+        # Method for determining whether a question is ambiguous.
+        # Options:
+        #   - "coherence": uses retrieval-based cluster coherence on top-k docs
+        #   - "classifier": uses a question-only BERT classifier
+        self.ambiguity_detection_method = config.ambiguity_detection_method
+
+        # Path of the question-level ambiguity classifier.
+        # Only used when ambiguity_detection_method == "classifier".
+        self.question_ambiguity_model_path = config.question_ambiguity_model_path
+
+        # Confidence cutoff below which the classifier cannot decide between
+        # "ambiguous" vs "unambiguous", and returns "uncertain".
+        self.question_ambiguity_uncertainty_cutoff = config.classifier_uncertainty_threshold
+
+        # Lazy-loaded classifier model (initialized on first use).
+        self.question_ambiguity_model = None
+        self.question_ambiguity_tokenizer = None
+
 
         # Build LangGraph workflow
         self.workflow = self._build_workflow()
@@ -256,6 +279,47 @@ class LangGraphAgenticDisambiguation:
             top_k=self.config.top_k,
             cache=self.cache
         )
+    def _load_ambiguity_classifier(self) -> None:
+        """
+        Lazy-load the question-level ambiguity classifier.
+
+        This loads a pretrained HuggingFace sequence classification model
+        used to label a question as "ambiguous", "unambiguous", or
+        "uncertain" (based on confidence cutoff).
+
+        Returns:
+            None
+        """
+        # Already loaded → nothing to do
+        if (
+            self.question_ambiguity_model is not None and
+            self.question_ambiguity_tokenizer is not None
+        ):
+            return
+
+        logger.info(f"Loading question ambiguity classifier from: "
+                    f"{self.question_ambiguity_model_path}")
+
+        try:
+            # Load tokenizer
+            self.question_ambiguity_tokenizer = AutoTokenizer.from_pretrained(
+                self.question_ambiguity_model_path
+            )
+
+            # Load model
+            self.question_ambiguity_model = AutoModelForSequenceClassification.from_pretrained(
+                self.question_ambiguity_model_path
+            )
+
+            # Set to inference mode
+            self.question_ambiguity_model.eval()
+
+            logger.info("✓ Ambiguity classifier loaded successfully.")
+
+        except Exception as e:
+            logger.error(f"Failed to load ambiguity classifier from "
+                        f"{self.question_ambiguity_model_path}: {e}")
+            raise e
 
     def _cleanup_retriever(self):
         """Clean up retriever to free memory."""
@@ -315,6 +379,70 @@ class LangGraphAgenticDisambiguation:
     # ------------------------------------------------------------------------
     # Helper Functions for Ambiguity & Pruning
     # ------------------------------------------------------------------------
+    def _classify_question_ambiguity(
+    self,
+    question: str,
+    uncertainty_threshold: float = 0.6,
+    ) -> tuple[str, float]:
+        """
+        Classify a question as "ambiguous", "unambiguous", or "uncertain".
+
+        This uses a pretrained HuggingFace sequence classification model with:
+            class 0 → ambiguous
+            class 1 → unambiguous
+
+        The method computes softmax probabilities and uses the highest
+        probability as a confidence score. If the confidence falls below
+        `uncertainty_threshold`, the result is labeled "uncertain".
+
+        Args:
+            question (str):
+                The input question being evaluated.
+            uncertainty_threshold (float):
+                Minimum confidence required to return a definite label.
+                If max probability < threshold, returns "uncertain".
+
+        Returns:
+            (label, confidence):
+                label (str): One of {"ambiguous", "unambiguous", "uncertain"}.
+                confidence (float): Softmax probability associated with the predicted label.
+        """
+        # Load classifier lazily on first use
+        self._load_ambiguity_classifier()
+
+        # Tokenize input
+        inputs = self.question_ambiguity_tokenizer(
+            question,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=256,
+        )
+
+        # Move to GPU if available
+        model = self.question_ambiguity_model
+        if torch.cuda.is_available():
+            model = model.cuda()
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+
+        # Forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+
+        # Prediction and probability
+        pred_idx = int(np.argmax(probs))
+        max_prob = float(probs[pred_idx])
+
+        # Uncertain if model is not confident enough
+        if max_prob < uncertainty_threshold:
+            return "uncertain", max_prob
+
+        # Predicted label
+        label = "ambiguous" if pred_idx == 0 else "unambiguous"
+        return label, max_prob
+
 
     def _assess_retrieval_validity(self, docs: List[RetrievalResult]) -> Dict[str, Any]:
         """
@@ -397,6 +525,8 @@ class LangGraphAgenticDisambiguation:
             "centroid": centroid,
             "reason": reason
         }
+    
+ 
 
     # ------------------------------------------------------------------------
     # LangGraph Node Functions
@@ -416,31 +546,78 @@ class LangGraphAgenticDisambiguation:
         retrieval_time = time.time() - start_time
         
         # 2. Coherence Check
-        validity = self._assess_retrieval_validity(retrieved_docs)
-        status = validity["status"]
+        if getattr(self, "ambiguity_detection_method", "coherence") == "coherence":
+            validity = self._assess_retrieval_validity(retrieved_docs)
+            status = validity["status"]
 
-        logger.debug(f"  Retrieved {len(retrieved_docs)} initial docs in {retrieval_time:.3f}s")
-        logger.debug(f"  Coherence Check Results:")
-        logger.debug(f"    - Status: {status}")
-        logger.debug(f"    - Variance: {validity.get('variance', 'N/A'):.3f}" if isinstance(validity.get('variance'), (int, float)) else f"    - Variance: {validity.get('variance', 'N/A')}")
-        logger.debug(f"    - Separability: {validity.get('separability', 'N/A'):.3f}" if isinstance(validity.get('separability'), (int, float)) else f"    - Separability: {validity.get('separability', 'N/A')}")
-        logger.debug(f"    - Reason: {validity['reason']}")
+            logger.debug(f"  Retrieved {len(retrieved_docs)} initial docs in {retrieval_time:.3f}s")
+            logger.debug(f"  Coherence Check Results:")
+            logger.debug(f"    - Status: {status}")
+            logger.debug(f"    - Variance: {validity.get('variance', 'N/A'):.3f}" if isinstance(validity.get('variance'), (int, float)) else f"    - Variance: {validity.get('variance', 'N/A')}")
+            logger.debug(f"    - Separability: {validity.get('separability', 'N/A'):.3f}" if isinstance(validity.get('separability'), (int, float)) else f"    - Separability: {validity.get('separability', 'N/A')}")
+            logger.debug(f"    - Reason: {validity['reason']}")
 
-        if status == "Uncertain":
-            logger.warning(f"Epistemic Failure detected! {validity['reason']}")
+            if status == "Uncertain":
+                logger.warning(f"Epistemic Failure detected! {validity['reason']}")
 
-        is_ambiguous = status in ("Ambiguous", "Uncertain")
-        
-        return {
-            **state,
-            "is_ambiguous": is_ambiguous,
-            "ambiguity_status": status,
-            "ambiguity_score": validity.get("separability", 0.0),
-            "ambiguity_reasoning": validity["reason"],
-            "retrieved_docs": [doc.to_dict() for doc in retrieved_docs[:self.config.top_k]],
-            "retrieval_time": retrieval_time,
-            "messages": [HumanMessage(content=f"Ambiguity Status: {status}. {validity['reason']}")],
-        }
+            is_ambiguous = status in ("Ambiguous", "Uncertain")
+            
+            return {
+                **state,
+                "is_ambiguous": is_ambiguous,
+                "ambiguity_status": status,
+                "ambiguity_score": validity.get("separability", 0.0),
+                "ambiguity_reasoning": validity["reason"],
+                "retrieved_docs": [doc.to_dict() for doc in retrieved_docs[:self.config.top_k]],
+                "retrieval_time": retrieval_time,
+                "messages": [HumanMessage(content=f"Ambiguity Status: {status}. {validity['reason']}")],
+            }
+        else:
+            logger.debug("  Ambiguity method: QUESTION-BASED CLASSIFIER")
+
+            # Uses softmax + cutoff internally to return "ambigious" / "unambigous" / "uncertain"
+            label_str, conf = self._classify_question_ambiguity(question)
+
+            if label_str == "uncertain":
+                status = "Uncertain"
+                is_ambiguous = True  # epistemic failure → treat as ambiguous for pathing
+                reasoning = (
+                    f"Classifier low confidence (max prob={conf:.3f}); "
+                    f"treating question as epistemically uncertain."
+                )
+                logger.warning(f"Epistemic Failure detected (classifier): {reasoning}")
+            elif label_str == "ambigious":
+                status = "Ambiguous"
+                is_ambiguous = True
+                reasoning = (
+                    f"Classifier prediction: ambigious (class 0) "
+                    f"with confidence={conf:.3f}."
+                )
+            else:  # "unambigous"
+                status = "Unambiguous"
+                is_ambiguous = False
+                reasoning = (
+                    f"Classifier prediction: unambigous (class 1) "
+                    f"with confidence={conf:.3f}."
+                )
+
+            logger.debug(f"  Classifier Status: {status}")
+            logger.debug(f"  Reason: {reasoning}")
+
+            return {
+                **state,
+                "is_ambiguous": is_ambiguous,
+                "ambiguity_status": status,
+                "ambiguity_score": conf,  # use classifier confidence here
+                "ambiguity_reasoning": reasoning,
+                "retrieved_docs": [doc.to_dict() for doc in retrieved_docs[:self.config.top_k]],
+                "retrieval_time": retrieval_time,
+                "messages": [
+                    HumanMessage(
+                        content=f"Ambiguity Status (classifier): {status}. {reasoning}"
+                    )
+                ],
+            }
 
     async def generate_subqueries_node(self, state: AgentState) -> AgentState:
         """
@@ -962,6 +1139,19 @@ def main():
 
     # Experiment settings
     parser.add_argument("--limit", type=int, default=None)
+    #ambiguity classification settings 
+    parser.add_argument(
+        "--classifier_uncertainty_threshold",
+        type=float,
+        default=0.6,
+        help="Minimum confidence required for the ambiguity classifier to make a hard decision. \
+            Below this threshold, the classifier outputs 'uncertain'."
+    )
+    parser.add_argument(
+        "--ambiguity_detection_method", type=str,
+        help="Coherence based or question based ambiguity classification", choices=["coherence", "question"]
+    )
+    
 
     # Debug and logging settings
     parser.add_argument("--verbose", action="store_true", help="Enable detailed debug logging for each step")
