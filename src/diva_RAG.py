@@ -24,7 +24,8 @@ from core import (
     load_existing_results,
     get_processed_question_ids,
     filter_unprocessed_data,
-    merge_results
+    merge_results,
+    get_question_field
 )
 from core.generators import LlamaCppGenerator
 from evaluation import RAGEvaluator, print_evaluation_report, detect_dataset_type, DatasetType
@@ -600,7 +601,7 @@ Example: Useful, 0.85"""
         semaphore: asyncio.Semaphore
     ) -> RAGResult:
         """Process a single item with concurrency control."""
-        question = item['question']
+        question = get_question_field(item, self.dataset)
         question_id = item.get('id', str(hash(question)))
 
         async with semaphore:
