@@ -44,6 +44,12 @@ class RAGConfig:
     # API settings
     openai_api_key: Optional[str] = None
 
+    ambiguity_detection_method: str = "question"
+    question_ambiguity_model_path: str = "models/distilbert-classifier"
+    classifier_uncertainty_threshold: float = 0.6
+
+
+
     # Additional metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 
