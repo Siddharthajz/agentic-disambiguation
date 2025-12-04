@@ -21,7 +21,7 @@ class RAGConfig:
     # Generation settings
     llm_model: str = "gpt-4o-mini"
     max_tokens: int = 200
-    temperature: float = 0.0
+    temperature: float = 0.1
 
     # Local LLM settings
     use_local_llm: bool = False

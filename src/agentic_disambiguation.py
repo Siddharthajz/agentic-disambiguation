@@ -953,7 +953,7 @@ def main():
     parser.add_argument("--use-local-llm", action="store_true", help="Use local LLM via llama.cpp instead of OpenAI API")
     parser.add_argument("--local-model-path", type=str, default="models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", help="Path to GGUF model file")
     parser.add_argument("--local-context-size", type=int, default=8192, help="Context window size for local LLM")
-    parser.add_argument("--local-gpu-layers", type=int, default=-1, help="GPU layers to offload (-1 for all, uses Metal on M1)")
+    parser.add_argument("--local-gpu-layers", type=int, default=-1, help="GPU layers to offload (-1 for all)")
 
     # Performance settings
     parser.add_argument("--concurrency", type=int, default=10)
