@@ -327,8 +327,12 @@ class LlamaCppGenerator(BaseGenerator):
     """
     Local LLM generator using llama.cpp.
 
-    Runs models locally without API dependency. Suitable for M1 Macs with
-    Metal acceleration. Supports GGUF quantized models.
+    Runs models locally without API dependency. Supports GPU acceleration on:
+    - macOS: Metal (automatic)
+    - Linux: CUDA (NVIDIA) or ROCm (AMD)
+    - Windows: CUDA
+
+    Supports GGUF quantized models.
 
     Default parameters optimized for Qwen3-4B-Instruct-2507:
     - temperature: 0.7 (Qwen recommended)
@@ -367,8 +371,12 @@ class LlamaCppGenerator(BaseGenerator):
         """
         if not LLAMA_CPP_AVAILABLE:
             raise ImportError(
-                "llama-cpp-python is not installed. "
-                "Install with: pip install llama-cpp-python"
+                "llama-cpp-python is not installed.\n"
+                "Platform-specific installation instructions:\n"
+                "  macOS (Metal):  pip install llama-cpp-python\n"
+                "  Linux (CUDA):   CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python\n"
+                "  Linux (ROCm):   CMAKE_ARGS='-DGGML_HIPBLAS=on' pip install llama-cpp-python\n"
+                "  Windows (CUDA): CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python"
             )
 
         super().__init__(model=model_path, max_tokens=max_tokens, temperature=temperature)
@@ -401,6 +409,68 @@ class LlamaCppGenerator(BaseGenerator):
         self._lock = threading.Lock()
 
         logger.info("Local LLM loaded successfully")
+
+        # Detect and log GPU backend
+        gpu_backend = self._detect_gpu_backend()
+        logger.info(f"GPU Backend: {gpu_backend}")
+
+        # Warn if GPU layers requested but no GPU detected
+        if n_gpu_layers > 0 and "CPU" in gpu_backend:
+            logger.warning(
+                "GPU layers requested but no GPU detected. "
+                "Performance will be limited. Install llama-cpp-python with GPU support:\n"
+                "  CUDA: CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python\n"
+                "  ROCm: CMAKE_ARGS='-DGGML_HIPBLAS=on' pip install llama-cpp-python"
+            )
+
+    def _detect_gpu_backend(self) -> str:
+        """
+        Detect which GPU backend is being used.
+
+        Returns:
+            String describing the GPU backend (e.g., "Metal", "CUDA", "ROCm", "CPU")
+        """
+        try:
+            import platform
+            import subprocess
+
+            system = platform.system()
+
+            if system == "Darwin":
+                return "Metal"
+            elif system == "Linux":
+                # Try to detect CUDA
+                try:
+                    result = subprocess.run(
+                        ["nvidia-smi"],
+                        capture_output=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        return "CUDA"
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+
+                # Try to detect ROCm
+                try:
+                    result = subprocess.run(
+                        ["rocm-smi"],
+                        capture_output=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        return "ROCm"
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+
+                return "CPU (no GPU detected)"
+            elif system == "Windows":
+                return "CUDA (assumed)"
+            else:
+                return "Unknown"
+        except Exception as e:
+            logger.debug(f"Error detecting GPU backend: {e}")
+            return "Unknown"
 
     def _generate_sync(self, prompt: str, system_prompt: str = None, temperature: float = None, top_p: float = None, top_k: int = None) -> Tuple[str, int]:
         """

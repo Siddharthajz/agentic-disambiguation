@@ -3,7 +3,7 @@
 Download recommended local LLM model for agentic disambiguation.
 
 Supports multiple Qwen models in GGUF format from HuggingFace.
-Optimized for M1 Mac with 16GB RAM.
+Works with GPU acceleration on macOS (Metal), Linux (CUDA/ROCm), and Windows (CUDA).
 """
 
 import argparse

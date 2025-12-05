@@ -339,7 +339,7 @@ def main():
         "--local-gpu-layers",
         type=int,
         default=-1,
-        help="Number of GPU layers to offload (-1 for all, uses Metal on M1)"
+        help="Number of GPU layers to offload (-1 for all)"
     )
 
     # Performance settings
