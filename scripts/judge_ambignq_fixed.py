@@ -246,6 +246,18 @@ async def main():
         action="store_true",
         help="Verbose output"
     )
+    parser.add_argument(
+        "--results-file",
+        type=str,
+        default=None,
+        help="Specific results.json file to judge (relative to results/ or absolute path)"
+    )
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        default=None,
+        help="Glob pattern for results files (e.g., 'ambignq/vanilla_rag_*/results.json')"
+    )
     
     args = parser.parse_args()
     
@@ -261,7 +273,22 @@ async def main():
     
     # Find all AmbigNQ results.json files
     results_dir = Path(__file__).parent.parent / "results"
-    results_files = sorted(results_dir.glob("ambignq/**/results.json"))
+    # results_files = sorted(results_dir.glob("ambignq/**/results.json"))
+    if args.results_file:
+        # Use specific file
+        results_file = Path(args.results_file)
+        if not results_file.is_absolute():
+            results_file = results_dir / results_file
+        results_files = [results_file] if results_file.exists() else []
+        if not results_files:
+            logger.error(f"Results file not found: {args.results_file}")
+            return
+    elif args.pattern:
+        # Use custom pattern
+        results_files = sorted(results_dir.glob(args.pattern))
+    else:
+        # Default: all AmbigNQ results
+        results_files = sorted(results_dir.glob("ambignq/**/results.json"))
     
     logger.info(f"Found {len(results_files)} AmbigNQ results files")
     

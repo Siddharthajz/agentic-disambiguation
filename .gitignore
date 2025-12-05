@@ -213,3 +213,25 @@ data/ambigqa_wiki_metadata.json
 data/ambigqa_wiki.index
 data/wiki_minilm.ndjson
 llama.cpp/
+
+# Ignore helpers
+helpers/
+scripts/generate_latex_table.py
+scripts/visualize_*.py
+/judge_*.py
+/judge_*.csv
+organize_judgments.py
+
+# Ignore shell scripts
+*.sh
+
+# Ignore visualization outputs
+visualizations/
+tables/
+figures/
+
+# Ignore json files in the outmost directory but not in subdirectories
+/*.json
+
+llama_cpp
+sys
