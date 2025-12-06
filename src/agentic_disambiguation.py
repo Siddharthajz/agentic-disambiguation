@@ -381,15 +381,14 @@ class LangGraphAgenticDisambiguation:
     # ------------------------------------------------------------------------
     def _classify_question_ambiguity(
     self,
-    question: str,
-    uncertainty_threshold: float = 0.6,
+    question: str
     ) -> tuple[str, float]:
         """
         Classify a question as "ambiguous", "unambiguous", or "uncertain".
 
         This uses a pretrained HuggingFace sequence classification model with:
-            class 0 → ambiguous
-            class 1 → unambiguous
+            class 1 → ambiguous
+            class 0 → unambiguous
 
         The method computes softmax probabilities and uses the highest
         probability as a confidence score. If the confidence falls below
@@ -436,11 +435,11 @@ class LangGraphAgenticDisambiguation:
         max_prob = float(probs[pred_idx])
 
         # Uncertain if model is not confident enough
-        if max_prob < uncertainty_threshold:
+        if max_prob < self.question_ambiguity_uncertainty_cutoff:
             return "uncertain", max_prob
 
         # Predicted label
-        label = "ambiguous" if pred_idx == 0 else "unambiguous"
+        label = "ambiguous" if pred_idx == 1 else "unambiguous"
         return label, max_prob
 
 
@@ -546,7 +545,9 @@ class LangGraphAgenticDisambiguation:
         retrieval_time = time.time() - start_time
         
         # 2. Coherence Check
-        if getattr(self, "ambiguity_detection_method", "coherence") == "coherence":
+        method = getattr(self, "ambiguity_detection_method", None)
+
+        if method == "coherence":
             validity = self._assess_retrieval_validity(retrieved_docs)
             status = validity["status"]
 
@@ -572,8 +573,8 @@ class LangGraphAgenticDisambiguation:
                 "retrieval_time": retrieval_time,
                 "messages": [HumanMessage(content=f"Ambiguity Status: {status}. {validity['reason']}")],
             }
-        else:
-            logger.debug("  Ambiguity method: QUESTION-BASED CLASSIFIER")
+        elif method == "question":
+            logger.debug(" Ambiguity method: QUESTION-BASED CLASSIFIER")
 
             # Uses softmax + cutoff internally to return "ambigious" / "unambigous" / "uncertain"
             label_str, conf = self._classify_question_ambiguity(question)
@@ -590,14 +591,14 @@ class LangGraphAgenticDisambiguation:
                 status = "Ambiguous"
                 is_ambiguous = True
                 reasoning = (
-                    f"Classifier prediction: ambigious (class 0) "
+                    f"Classifier prediction: ambigious (class 1) "
                     f"with confidence={conf:.3f}."
                 )
             else:  # "unambigous"
                 status = "Unambiguous"
                 is_ambiguous = False
                 reasoning = (
-                    f"Classifier prediction: unambigous (class 1) "
+                    f"Classifier prediction: unambigous (class 0) "
                     f"with confidence={conf:.3f}."
                 )
 
@@ -608,7 +609,7 @@ class LangGraphAgenticDisambiguation:
                 **state,
                 "is_ambiguous": is_ambiguous,
                 "ambiguity_status": status,
-                "ambiguity_score": conf,  # use classifier confidence here
+                "ambiguity_score": conf, 
                 "ambiguity_reasoning": reasoning,
                 "retrieved_docs": [doc.to_dict() for doc in retrieved_docs[:self.config.top_k]],
                 "retrieval_time": retrieval_time,
@@ -618,6 +619,33 @@ class LangGraphAgenticDisambiguation:
                     )
                 ],
             }
+        else: 
+            # Fallback: ambiguity method not specified → default to Ambiguous
+            logger.warning(
+                "No valid ambiguity_detection_method specified; "
+                "defaulting ambiguity status to AMBIGUOUS."
+            )
+
+            reasoning = (
+                "Ambiguity detection method was not provided. "
+                "Defaulting to ambiguous for conservative routing."
+            )
+
+            return {
+                **state,
+                "is_ambiguous": True,
+                "ambiguity_status": "Ambiguous",
+                "ambiguity_score": 0.0,  
+                "ambiguity_reasoning": reasoning,
+                "retrieved_docs": [doc.to_dict() for doc in retrieved_docs[:self.config.top_k]],
+                "retrieval_time": retrieval_time,
+                "messages": [
+                    HumanMessage(
+                        content=f"Ambiguity Status: Ambiguous. {reasoning}"
+                    )
+                ],
+            }
+
 
     async def generate_subqueries_node(self, state: AgentState) -> AgentState:
         """
@@ -1143,7 +1171,7 @@ def main():
     parser.add_argument(
         "--classifier_uncertainty_threshold",
         type=float,
-        default=0.6,
+        default=0.5,
         help="Minimum confidence required for the ambiguity classifier to make a hard decision. \
             Below this threshold, the classifier outputs 'uncertain'."
     )

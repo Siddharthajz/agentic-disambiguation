@@ -43,10 +43,11 @@ class RAGConfig:
 
     # API settings
     openai_api_key: Optional[str] = None
-
-    ambiguity_detection_method: str = "question"
+    
+    #ambiguity detection settings
+    ambiguity_detection_method: Optional[str] = None
     question_ambiguity_model_path: str = "models/distilbert-classifier"
-    classifier_uncertainty_threshold: float = 0.6
+    classifier_uncertainty_threshold: float = 0.5
 
 
 
@@ -125,5 +126,9 @@ class RAGConfig:
             use_cache=getattr(args, 'use_cache', True),
             concurrency=args.concurrency,
             batch_size=getattr(args, 'batch_size', 10),
-            d_f1_threshold=getattr(args, 'd_f1_threshold', 0.5)
+            d_f1_threshold=getattr(args, 'd_f1_threshold', 0.5),
+            ambiguity_detection_method=getattr(args, "ambiguity_detection_method", None),
+            classifier_uncertainty_threshold=getattr(
+            args, "classifier_uncertainty_threshold", 0.6
+        )
         )
