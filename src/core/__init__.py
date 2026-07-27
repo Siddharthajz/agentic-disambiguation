@@ -17,6 +17,7 @@ from .retrievers import (
     create_retriever
 )
 from .generators import BaseGenerator, OpenAIGenerator, HyDEGenerator, LlamaCppGenerator, LLAMA_CPP_AVAILABLE
+from .judge import BaseJudge, OpenAIJudge, CachedJudge
 from .cache import RetrievalCache
 from .config import RAGConfig
 from .prompts import (
@@ -50,6 +51,9 @@ __all__ = [
     "HyDEGenerator",
     "LlamaCppGenerator",
     "LLAMA_CPP_AVAILABLE",
+    "BaseJudge",
+    "OpenAIJudge",
+    "CachedJudge",
     "RetrievalCache",
     "RAGConfig",
     "DatasetType",
